@@ -15,7 +15,7 @@ import type { ConversationMessage } from "../conversation/l0-recorder.js";
 export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `你是专业的"情境切分与记忆提取专家"。
 你的任务是分析用户的对话，判断情境切换，并从中提取结构化的核心记忆（仅限 persona, episodic, instruction 三类）。
 
-**输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用与用户消息相同的语言；JSON 字段名、枚举值、ISO 时间戳保持英文。
+**输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用【待提取的新消息】中 **user 发言的主导语言**。判断语言时**只看 user 发言**，忽略 assistant 回复的语言，也忽略中英文专有名词（人名、品牌、技术术语等）——例如用户用中文提问、即使内容涉及 Michael Jackson，输出仍用中文；人名等专有名词可保留原文或中文后括注原文。JSON 字段名、枚举值、ISO 时间戳保持英文。
 
 ### 任务一：情境切分（Scene Segmentation）
 分析【待提取的新消息】，结合【上一个情境】，判断并输出当前对话的情境。
@@ -35,7 +35,7 @@ export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `你是专业的"情境切分与�
 3. 归纳合并：强关联或因果关系的多条消息，必须合并为一条完整记忆，不可碎片化。
 
 【支持提取的三大类型】（必须严格遵守类型规则）
-> 下面给出的"提取句式"和"触发词"仅作为中文骨架参考；**实际 \`content\` 必须按上述输出语言书写**（例如英文用户 → "The user (Maya) is a senior product manager based in Berlin"）。
+> 下面给出的"提取句式"和"触发词"是中文骨架；**实际 \`content\` 必须按上述输出语言书写**——中文用户 → "用户（小美）是柏林的一位资深产品经理"；英文用户 → "The user (Maya) is a senior product manager based in Berlin"。
 
 1. 个性化记忆 (type: "persona")
    - 定义：用户的稳定属性、偏好、技能、价值观、习惯（如住所、职业、饮食禁忌）。
@@ -107,7 +107,7 @@ export const EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT = `你是专业的"工作情境
 
 本任务面向工作场合的团队协作场景。你应重点提取项目事实、任务进展、决策结论、工作方法、SOP、禁忌、设计思路、交付物等对团队后续协作和 Agent 执行有长期价值的信息。
 
-**输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用与待提取消息主导语言相同的语言；JSON 字段名、枚举值、ISO 时间戳保持英文。
+**输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用【待提取的新消息】中 **user 发言的主导语言**（判断时忽略 assistant 回复与专有名词，专有名词可保留原文）；JSON 字段名、枚举值、ISO 时间戳保持英文。
 
 ---
 
@@ -403,7 +403,7 @@ export function formatExtractionPrompt(params: {
     .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
     .join("\n\n");
 
-  return `**输出语言**：根据下方"待提取的新消息"中 user 发言的主导语言书写 \`scene_name\` 和 memory \`content\`。
+  return `**输出语言**：根据下方"待提取的新消息"中 **user 发言**的主导语言书写 \`scene_name\` 和 memory \`content\`（忽略 assistant 回复与专有名词的语言；专有名词保留原文即可）。
 
 【上一个情境】：${previousSceneName}
 

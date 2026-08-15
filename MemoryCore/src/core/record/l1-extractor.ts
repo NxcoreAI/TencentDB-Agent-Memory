@@ -545,10 +545,21 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
     try {
       parsed = JSON.parse(sanitized) as unknown[];
     } catch (err) {
-      const repaired = repairExtractionJson(sanitized);
-      if (repaired === sanitized) throw err;
-      parsed = JSON.parse(repaired) as unknown[];
-      logger?.warn?.(`${TAG} Repaired non-strict extraction JSON: ${err instanceof Error ? err.message : String(err)}`);
+      // Some models return a single scene object `{scene_name, ...}` instead of
+      // the requested array. The greedy array regex then slices from the first
+      // `[` (message_ids) to the last `]`, which parses as that inner array
+      // followed by trailing tokens ("...after JSON at position N"). Recover by
+      // parsing the whole response as one scene object.
+      const singleScene = tryParseSingleScene(cleaned);
+      if (singleScene) {
+        logger?.warn?.(`${TAG} Recovered single-object extraction response (expected array of scenes)`);
+        parsed = [singleScene];
+      } else {
+        const repaired = repairExtractionJson(sanitized);
+        if (repaired === sanitized) throw err;
+        parsed = JSON.parse(repaired) as unknown[];
+        logger?.warn?.(`${TAG} Repaired non-strict extraction JSON: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     if (!Array.isArray(parsed)) {
@@ -559,23 +570,7 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
     const scenes: SceneSegment[] = [];
     for (const item of parsed) {
       if (!item || typeof item !== "object") continue;
-      const s = item as Record<string, unknown>;
-
-      scenes.push({
-        scene_name: typeof s.scene_name === "string" ? s.scene_name : "未知情境",
-        message_ids: Array.isArray(s.message_ids) ? s.message_ids.map(String) : [],
-        memories: Array.isArray(s.memories)
-          ? (s.memories as Array<Record<string, unknown>>)
-              .filter((m) => m && typeof m === "object" && typeof m.content === "string" && (m.content as string).length > 0)
-              .map((m) => ({
-                content: String(m.content),
-                type: String(m.type ?? "episodic"),
-                priority: typeof m.priority === "number" ? m.priority : 50,
-                source_message_ids: Array.isArray(m.source_message_ids) ? m.source_message_ids.map(String) : [],
-                metadata: (m.metadata && typeof m.metadata === "object" ? m.metadata : {}) as Record<string, unknown>,
-              }))
-          : [],
-      });
+      scenes.push(coerceScene(item as Record<string, unknown>));
     }
 
     return scenes;
@@ -586,6 +581,45 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
       `${TAG} [l1-debug] PARSE_FAIL rawLen=${raw.length}, rawFull=${JSON.stringify(rawPreview)}${raw.length > 2048 ? `…(+${raw.length - 2048})` : ""}`,
     );
     return [];
+  }
+}
+
+/**
+ * Coerce a parsed JSON value into a SceneSegment with defensive defaults.
+ */
+function coerceScene(s: Record<string, unknown>): SceneSegment {
+  return {
+    scene_name: typeof s.scene_name === "string" ? s.scene_name : "未知情境",
+    message_ids: Array.isArray(s.message_ids) ? s.message_ids.map(String) : [],
+    memories: Array.isArray(s.memories)
+      ? (s.memories as Array<Record<string, unknown>>)
+          .filter((m) => m && typeof m === "object" && typeof m.content === "string" && (m.content as string).length > 0)
+          .map((m) => ({
+            content: String(m.content),
+            type: String(m.type ?? "episodic"),
+            priority: typeof m.priority === "number" ? m.priority : 50,
+            source_message_ids: Array.isArray(m.source_message_ids) ? m.source_message_ids.map(String) : [],
+            metadata: (m.metadata && typeof m.metadata === "object" ? m.metadata : {}) as Record<string, unknown>,
+          }))
+      : [],
+  };
+}
+
+/**
+ * Some models return a single scene object `{scene_name, message_ids, memories}`
+ * instead of the requested array. Try to parse the whole cleaned response as
+ * one scene object; return null if it is not shaped like a scene.
+ */
+function tryParseSingleScene(cleaned: string): SceneSegment | null {
+  if (!cleaned.startsWith("{")) return null;
+  try {
+    const obj = JSON.parse(sanitizeJsonForParse(cleaned)) as unknown;
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const s = obj as Record<string, unknown>;
+    if (!Array.isArray(s.memories)) return null;
+    return coerceScene(s);
+  } catch {
+    return null;
   }
 }
 
