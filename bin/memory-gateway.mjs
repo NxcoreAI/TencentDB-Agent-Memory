@@ -6,18 +6,20 @@
  * TDAI_* 环境变量注入（TDAI_GATEWAY_PORT / TDAI_GATEWAY_HOST /
  * TDAI_GATEWAY_API_KEY / TDAI_LLM_* / TDAI_DATA_DIR），无需任何 yaml。
  *
- * 通过 require.resolve 拿到本包 node_modules 内的 tsx 绝对路径再传给
- * --import，避免子进程 cwd 不在本包目录时解析失败。
+ * Windows + Node 22 的注意点：
+ * - `--import` 必须传 tsx loader 的 file:// URL（裸盘符路径会被判为 URL scheme）；
+ * - 主入口必须传正斜杠路径（file:// URL 会被误判为 CJS 相对路径）。
  */
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const tsxEntry = require.resolve("tsx");
-const serverEntry = pathToFileURL(new URL("../src/gateway/server.ts", import.meta.url).href);
+const tsxEntryUrl = pathToFileURL(require.resolve("tsx")).href;
+const serverEntry = fileURLToPath(new URL("../src/gateway/server.ts", import.meta.url)).replace(/\\/g, "/");
 
-const result = spawnSync(process.execPath, ["--import", tsxEntry, serverEntry], {
+const result = spawnSync(process.execPath, ["--import", tsxEntryUrl, serverEntry], {
   stdio: "inherit",
   env: process.env,
 });
