@@ -126,6 +126,9 @@ data/tdai-memory.db
 **/data/_wiki_engines/
 **/data/mem-*/
 
+# MemoryKnowledge 运行时数据目录整体不入库（wiki 原文/生成页/索引全在里面）
+MemoryKnowledge/data/
+
 # Test coverage output
 coverage/
 **/coverage/

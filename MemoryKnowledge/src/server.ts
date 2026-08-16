@@ -14,7 +14,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { swaggerUI } from "@hono/swagger-ui";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 import { loadConfig } from "./config.js";
@@ -140,7 +140,9 @@ async function startServer(): Promise<void> {
 }
 
 // Start server when run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Windows 兼容：import.meta.url 是 file:///E:/... 形式，拼串比较在 win32 必不相等，
+// 用 pathToFileURL 归一化后再比（相对路径按 cwd 解析，tsx 传的是相对路径）。
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   void startServer().catch((err) => {
     log.error("Knowledge service failed to start", {
       error: err instanceof Error ? err.message : String(err),

@@ -1,25 +1,26 @@
 {
   "name": "@tencentdb-agent-memory/memory-tencentdb-v2",
-  "version": "2.0.0-beta.1",
+  "version": "2.0.0-beta.1-everroom.2",
   "description": "Four-layer local memory system plugin for OpenClaw — auto-captures, structures, and profiles conversational knowledge using local LLM + SQLite vector search (L0→L1→L2→L3 pipeline)",
   "type": "module",
   "main": "./dist/index.mjs",
   "bin": {
     "migrate-sqlite-to-tcvdb": "./bin/migrate-sqlite-to-tcvdb.mjs",
     "export-tencent-vdb": "./bin/export-tencent-vdb.mjs",
-    "read-local-memory": "./bin/read-local-memory.mjs"
+    "read-local-memory": "./bin/read-local-memory.mjs",
+    "memory-gateway": "./bin/memory-gateway.mjs"
   },
   "exports": {
     ".": {
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
-    }
+    },
+    "./bin/*": "./bin/*"
   },
   "scripts": {
     "build": "npm run build:plugin && npm run build:scripts",
     "build:plugin": "tsdown",
     "build:scripts": "npm run build:migrate-sqlite-to-vdb && npm run build:export-tencent-vdb && npm run build:read-local-memory && npm run build:seed-v2",
-    "prepack": "npm run build",
     "build:migrate-sqlite-to-vdb": "tsc -p scripts/migrate-sqlite-to-tcvdb/tsconfig.json --noEmitOnError false",
     "migrate-sqlite-to-tcvdb": "node ./bin/migrate-sqlite-to-tcvdb.mjs",
     "build:export-tencent-vdb": "tsc --project scripts/export-tencent-vdb/tsconfig.json",
@@ -52,6 +53,7 @@
     "bin/migrate-sqlite-to-tcvdb.mjs",
     "bin/export-tencent-vdb.mjs",
     "bin/read-local-memory.mjs",
+    "bin/memory-gateway.mjs",
     "index.ts",
     "scripts/migrate-sqlite-to-tcvdb/dist/",
     "scripts/export-tencent-vdb/dist/",

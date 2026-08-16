@@ -12,7 +12,7 @@
  *   lib 层 cascadeDeleteWikiPagesWithRefs 做引用级联。
  */
 
-import { join, resolve, normalize } from "node:path";
+import { join, resolve, normalize, sep } from "node:path";
 import {
   rmSync,
   mkdirSync,
@@ -909,7 +909,9 @@ export class WikiService {
     // （如 KNOWLEDGE_DATA_DIR=./data）与 resolve 出来的绝对路径比较失败。
     const base = resolve(sourcesDir);
     const safe = resolve(base, normalized);
-    const dirWithSep = base.endsWith("/") ? base : base + "/";
+    // Windows 兼容：resolve() 产出 path.sep 分隔符，前缀比较必须同用 sep，
+    // 硬编码 "/" 在 win32 上会把所有合法路径误判为 traversal。
+    const dirWithSep = base.endsWith(sep) ? base : base + sep;
     if (safe !== base && !safe.startsWith(dirWithSep)) return null;
     return safe;
   }
@@ -930,7 +932,8 @@ export class WikiService {
 
     // resolve 成绝对路径，避免 projectPath 是相对路径时比较失败。
     const wikiDir = resolve(projectPath, "wiki");
-    const wikiDirSep = wikiDir.endsWith("/") ? wikiDir : wikiDir + "/";
+    // 同 resolveRawPath：用 path.sep，win32 下硬编码 "/" 必然误判。
+    const wikiDirSep = wikiDir.endsWith(sep) ? wikiDir : wikiDir + sep;
 
     // 先按原样尝试，再尝试补 .md 扩展。
     const candidates = cleanRef.endsWith(".md") ? [cleanRef] : [cleanRef + ".md", cleanRef];
