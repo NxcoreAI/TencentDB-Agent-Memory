@@ -44,6 +44,15 @@ export interface IsolationFilter {
   sessionId?: string;
   taskId?: string;
   sessionKey?: string;
+  /**
+   * 来源过滤（fork 文档子系统）：'conversation' | 'document'。
+   * conversation/search 默认带 sourceKind="conversation" 排除文档分块。
+   * 仅对 meta 行带 source_kind 列的后端生效（sqlite）；TCVDB 行无该列，
+   * 缺省按 'conversation' 匹配，行为不变。
+   */
+  sourceKind?: string;
+  /** 来源引用过滤（document 时为 document_id）。 */
+  sourceRef?: string;
 }
 
 /** Runtime config governing isolation enforcement. */
@@ -157,7 +166,7 @@ export function buildIsolationWhere(
  * store cannot push the filter down (e.g. older TCVDB collection).
  */
 export function rowMatchesIsolation(
-  row: { team_id?: string; user_id?: string; agent_id?: string; session_id?: string; task_id?: string; session_key?: string },
+  row: { team_id?: string; user_id?: string; agent_id?: string; session_id?: string; task_id?: string; session_key?: string; source_kind?: string; source_ref?: string },
   filter: IsolationFilter | undefined,
 ): boolean {
   if (!filter) return true;
@@ -167,5 +176,8 @@ export function rowMatchesIsolation(
   if (filter.sessionId !== undefined && row.session_id !== filter.sessionId) return false;
   if (filter.taskId !== undefined && row.task_id !== filter.taskId) return false;
   if (filter.sessionKey !== undefined && row.session_key !== filter.sessionKey) return false;
+  // 来源过滤：无列后端（TCVDB）与存量行缺省视为 'conversation'。
+  if (filter.sourceKind !== undefined && (row.source_kind || "conversation") !== filter.sourceKind) return false;
+  if (filter.sourceRef !== undefined && (row.source_ref || "") !== filter.sourceRef) return false;
   return true;
 }

@@ -55,6 +55,9 @@ export interface L0MessageRecord {
   role: "user" | "assistant";
   content: string;
   timestamp: number; // epoch ms
+  /** 来源标记（fork 文档子系统）：document 时 sourceRef 为 document_id。 */
+  sourceKind?: string;
+  sourceRef?: string;
 }
 
 /**

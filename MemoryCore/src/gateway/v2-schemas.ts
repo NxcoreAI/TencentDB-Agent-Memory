@@ -92,6 +92,10 @@ export interface ConversationItem extends GeneratedConversationItem {
   agent_id?: string;
   /** Optional task ownership dimension for L0/L1 filtering. */
   task_id?: string;
+  /** 来源标记（fork 文档子系统）：'conversation'（缺省/存量）| 'document'（文档分块）。 */
+  source_kind?: string;
+  /** document 时为 document_id，conversation 为空字符串。 */
+  source_ref?: string;
 }
 
 export type ConversationSearchHit = ConversationItem & { score: number };
@@ -154,6 +158,14 @@ export interface AtomicDetail extends GeneratedAtomicDetail {
   user_id?: string;
   agent_id?: string;
   task_id?: string;
+  /** L1 来源标记：'conversation'（缺省/存量）| 'document'（文档派生）。 */
+  source_kind?: string;
+  /** document 时为 document_id，conversation 为空字符串。 */
+  source_ref?: string;
+  /** 本条记忆依据的 L0 message id 列表（溯源锚点）。 */
+  source_message_ids?: string[];
+  /** 派生自的 L0 会话 id（文档记忆为 memdoc:<documentId>:v<n>）。 */
+  session_id?: string;
 }
 
 export interface AtomicQueryData {
@@ -166,6 +178,41 @@ export type AtomicSearchHit = AtomicDetail & { score: number };
 export interface AtomicSearchData {
   items: AtomicSearchHit[];
 }
+
+// ============================
+// Override: source filters（fork 文档子系统）
+// ============================
+//
+// 在 generated 基线上追加可选 source_kind / source_ref 过滤。
+// conversation/search 的 source_kind 缺省值（排除文档分块）由 handler 决定，
+// schema 层保持纯可选，GET（query params）与 POST 均可携带。
+
+const sourceFilterShape = z.object({
+  source_kind: z.enum(["conversation", "document"]).optional(),
+  source_ref: z.string().min(1).max(256).optional(),
+});
+
+/** conversation/query + 可选来源过滤（列出文档分块时 source_kind="document"）。 */
+export const conversationQueryRequestSchemaV2 = conversationQueryRequestSchema.and(sourceFilterShape);
+export type ConversationQueryRequestV2 = z.infer<typeof conversationQueryRequestSchemaV2>;
+
+/** conversation/search + 可选来源过滤。handler 默认补 source_kind="conversation"。 */
+export const conversationSearchRequestSchemaV2 = conversationSearchRequestSchema.and(sourceFilterShape);
+export type ConversationSearchRequestV2 = z.infer<typeof conversationSearchRequestSchemaV2>;
+
+/** atomic/query + 可选来源过滤（按 document_id 反查派生记忆）。 */
+export const atomicQueryRequestSchemaV2 = atomicQueryRequestSchema.and(sourceFilterShape);
+export type AtomicQueryRequestV2 = z.infer<typeof atomicQueryRequestSchemaV2>;
+
+/** atomic/search + 可选来源过滤。 */
+export const atomicSearchRequestSchemaV2 = atomicSearchRequestSchema.and(sourceFilterShape);
+export type AtomicSearchRequestV2 = z.infer<typeof atomicSearchRequestSchemaV2>;
+
+/** /v3/atomic/provenance：按 memory_id 反查来源（会话/文档）与 L0 依据锚点。 */
+export const atomicProvenanceRequestSchema = z.strictObject({
+  memory_id: z.string().trim().min(1).max(128),
+});
+export type AtomicProvenanceRequest = z.infer<typeof atomicProvenanceRequestSchema>;
 
 export interface ScenarioEntry extends Omit<GeneratedScenarioEntry, "version"> {
   version?: number;

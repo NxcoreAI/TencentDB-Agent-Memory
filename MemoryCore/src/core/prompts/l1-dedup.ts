@@ -134,7 +134,8 @@ export const WORK_CONFLICT_DETECTION_SYSTEM_PROMPT = `你是团队工作记忆�
 - merged_timestamps：合并后的时间戳数组。收集新记忆 + 所有被合并旧记忆的时间戳，去重排序。`;
 
 export function getConflictDetectionSystemPrompt(mode: MemoryPromptMode = "chat"): string {
-  return mode === "code" ? WORK_CONFLICT_DETECTION_SYSTEM_PROMPT : CONFLICT_DETECTION_SYSTEM_PROMPT;
+  // document 与 code 同用工作记忆判定规则（文档类型限定集为 work_* + instruction）。
+  return mode === "code" || mode === "document" ? WORK_CONFLICT_DETECTION_SYSTEM_PROMPT : CONFLICT_DETECTION_SYSTEM_PROMPT;
 }
 
 // ============================

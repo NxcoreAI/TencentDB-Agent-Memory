@@ -30,6 +30,7 @@ import { StorageAdapter } from "../storage/adapter.js";
 import type { ResolvedMemoryPrompt } from "../memory-prompt/types.js";
 import { composeMemorySystemPrompt } from "../memory-prompt/composer.js";
 import { LocalStorageBackend } from "../storage/local-backend.js";
+import type { MemorySource } from "../document/types.js";
 import {
   buildGenerationLogIdentity,
   buildGenerationProvenance,
@@ -115,6 +116,12 @@ export async function extractL1Memories(params: {
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
     promptMode?: MemoryPromptMode;
+    /**
+     * 来源标记（fork 文档子系统）。kind="document" 时强制文档模式：
+     * scene_name=文档标题、类型限定 work_*+instruction（persona/episodic 丢弃）、
+     * 无 previousSceneName、写 source_kind/source_ref 列。
+     */
+    source?: MemorySource;
     /** Resolved custom strategy. Undefined preserves the current system prompt exactly. */
     memoryPrompt?: ResolvedMemoryPrompt;
     /** Vector store for cosine similarity candidate recall */
@@ -183,17 +190,38 @@ export async function extractL1Memories(params: {
 
   logger?.debug?.(`${TAG} Extracting from ${newMessages.length} new messages (+ ${backgroundMessages.length} background) [${qualifiedMessages.length} qualified from ${messages.length} input]`);
 
+  // ── 文档模式（fork 文档子系统）──
+  // kind=document 的 L0 组（memdoc: 会话）走文档提炼：标题优先取 source.title，
+  // 缺席时回查 documents 登记行，再退化为 document_id。
+  const isDocument = options.source?.kind === "document";
+  const effectivePromptMode: MemoryPromptMode = isDocument ? "document" : (options.promptMode ?? "chat");
+  let documentTitle: string | undefined;
+  if (isDocument) {
+    documentTitle = options.source?.title;
+    if (!documentTitle && options.source?.ref && options.vectorStore?.getDocument) {
+      try {
+        const doc = await options.vectorStore.getDocument(options.source.ref);
+        documentTitle = doc?.title;
+      } catch (err) {
+        logger?.warn?.(`${TAG} document title lookup failed (ref=${options.source.ref}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    documentTitle = documentTitle || options.source?.ref || "未命名文档";
+    logger?.debug?.(`${TAG} Document mode: title="${documentTitle}" ref=${options.source?.ref}`);
+  }
+
   // Step 1: LLM extraction (scene segmentation + memory extraction)
   let scenes: SceneSegment[];
   try {
     scenes = await callLlmExtraction({
       newMessages,
-      backgroundMessages,
-      previousSceneName: options.previousSceneName,
+      backgroundMessages: isDocument ? [] : backgroundMessages,
+      previousSceneName: isDocument ? undefined : options.previousSceneName,
+      documentTitle,
       config,
       logger,
       model: options.model,
-      promptMode: options.promptMode,
+      promptMode: effectivePromptMode,
       memoryPrompt: options.memoryPrompt,
       traceContext: { teamId, userId, agentId, sessionId },
       llmRunner: options.llmRunner,
@@ -209,11 +237,16 @@ export async function extractL1Memories(params: {
   const sceneNames: string[] = [];
 
   for (const scene of scenes) {
-    sceneNames.push(scene.scene_name);
+    sceneNames.push(isDocument ? (documentTitle ?? scene.scene_name) : scene.scene_name);
     for (const mem of scene.memories) {
       const memType = normalizeType(mem.type);
       if (!memType) {
         logger?.warn?.(`${TAG} Skipping memory with invalid type "${mem.type}"`);
+        continue;
+      }
+      if (isDocument && (memType === "persona" || memType === "episodic")) {
+        // 文档类型限定集（用户拍板）：只留 work_* + instruction。
+        logger?.debug?.(`${TAG} Document mode: dropping ${memType} memory "${mem.content.slice(0, 40)}..."`);
         continue;
       }
       allExtracted.push({
@@ -222,7 +255,7 @@ export async function extractL1Memories(params: {
         priority: typeof mem.priority === "number" ? mem.priority : 50,
         source_message_ids: Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [],
         metadata: mem.metadata ?? {},
-        scene_name: scene.scene_name,
+        scene_name: isDocument ? (documentTitle ?? scene.scene_name) : scene.scene_name,
       });
     }
   }
@@ -286,7 +319,7 @@ export async function extractL1Memories(params: {
         config,
         logger,
         model: options.model,
-        promptMode: options.promptMode,
+        promptMode: effectivePromptMode,
         vectorStore: options.vectorStore,
         embeddingService: options.embeddingService,
         conflictRecallTopK: options.conflictRecallTopK,
@@ -325,6 +358,8 @@ export async function extractL1Memories(params: {
         teamId,
         userId,
         agentId,
+        sourceKind: options.source?.kind,
+        sourceRef: options.source?.ref,
         logger,
         vectorStore: options.vectorStore,
         embeddingService: options.embeddingService,
@@ -333,10 +368,10 @@ export async function extractL1Memories(params: {
 
     } catch (err) {
       logger?.warn?.(`${TAG} Batch dedup failed, storing all as new: ${err instanceof Error ? err.message : String(err)}`);
-      storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+      storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage, options.source?.kind, options.source?.ref);
     }
   } else {
-    storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+    storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage, options.source?.kind, options.source?.ref);
   }
 
   const logStorage = storage ?? new StorageAdapter(new LocalStorageBackend(baseDir));
@@ -358,7 +393,8 @@ export async function extractL1Memories(params: {
     input_refs: newMessages.map((message) => ({ layer: "l0", record_id: message.id })),
     output_refs: storedRecords.map((record) => ({ layer: "l1", record_id: record.id })),
     model: options.model,
-    prompt_mode: options.promptMode ?? "chat",
+    prompt_mode: effectivePromptMode,
+    ...(options.source?.kind ? { source_kind: options.source.kind } : {}),
     started_at_ms: l1StartMs,
     finished_at_ms: generationFinishedAt,
     latency_ms: generationFinishedAt - l1StartMs,
@@ -452,6 +488,7 @@ async function callLlmExtraction(params: {
   newMessages: ConversationMessage[];
   backgroundMessages: ConversationMessage[];
   previousSceneName?: string;
+  documentTitle?: string;
   config: unknown;
   logger?: Logger;
   model?: string;
@@ -462,13 +499,14 @@ async function callLlmExtraction(params: {
   /** langfuse 上报身份四元组（team/user/agent/session）。 */
   traceContext?: TraceContext;
 }): Promise<SceneSegment[]> {
-  const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", memoryPrompt, llmRunner, traceContext } = params;
+  const { newMessages, backgroundMessages, previousSceneName, documentTitle, config, logger, model, promptMode = "chat", memoryPrompt, llmRunner, traceContext } = params;
 
   const systemPrompt = composeMemorySystemPrompt(getExtractMemoriesSystemPrompt(promptMode), memoryPrompt);
   const userPrompt = formatExtractionPrompt({
     newMessages,
     backgroundMessages,
     previousSceneName,
+    documentTitle,
   });
 
   // [l1-debug] ENTRY — what are we about to ask the LLM to extract?
@@ -649,12 +687,14 @@ async function applyDecisions(params: {
   teamId?: string;
   userId?: string;
   agentId?: string;
+  sourceKind?: string;
+  sourceRef?: string;
   logger?: Logger;
   vectorStore?: IMemoryStore;
   embeddingService?: EmbeddingService;
   storage?: StorageAdapter;
 }): Promise<MemoryRecord[]> {
-  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage } = params;
+  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, sourceKind, sourceRef, logger, vectorStore, embeddingService, storage } = params;
   const storedRecords: MemoryRecord[] = [];
 
   // Build a map from record_id → decision
@@ -681,6 +721,8 @@ async function applyDecisions(params: {
         teamId,
         userId,
         agentId,
+        sourceKind,
+        sourceRef,
         logger,
         vectorStore,
         embeddingService,
@@ -716,6 +758,8 @@ async function storeAllDirectly(
   vectorStore?: IMemoryStore,
   embeddingService?: EmbeddingService,
   storage?: StorageAdapter,
+  sourceKind?: string,
+  sourceRef?: string,
 ): Promise<MemoryRecord[]> {
   const storedRecords: MemoryRecord[] = [];
 
@@ -735,6 +779,8 @@ async function storeAllDirectly(
         teamId,
         userId,
         agentId,
+        sourceKind,
+        sourceRef,
         logger,
         vectorStore,
         embeddingService,

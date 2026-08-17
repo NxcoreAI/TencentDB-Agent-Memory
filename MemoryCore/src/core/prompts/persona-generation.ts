@@ -306,6 +306,17 @@ export function buildPersonaPrompt(params: PersonaPromptParams): PersonaPromptRe
         `面对变化场景，自主判断处理方式：强化（佐证已有洞察）/ 补充（新维度）/ 修正（矛盾）/ 重构（结构调整）/ 不改（无有用新增内容）。\n`
     : "";
 
+  // 文档来源场景表述框架（fork 文档子系统）：文档派生 L1 的 scene_name = 文档标题，
+  // L2/L3 不排除这类场景（per user 决策），但 prompt 需告知其来源语义，
+  // 避免把文档知识误写成用户对话行为。
+  const documentSceneGuide =
+    `\n## 📎 文档来源场景说明\n\n` +
+    `部分场景块的名称是某个**导入文档的标题**（其记忆提炼自用户导入的 md 文档，而非对话消息）。对这类场景：\n` +
+    (isCodeMode
+      ? `- 应抽象为跨场景可复用的方法、原则、禁忌或约束；文档中的项目事实仍只作证据，不直接进入 L3。\n`
+      : `- 应作为用户的知识背景、技能与工作上下文写入 persona（例如用户掌握/关注/沉淀了什么），不要写成"用户表示/用户说过"这类对话行为。\n`) +
+    `- 文档会随版本更替重新导入，同名场景以最新内容为准。\n`;
+
   const userPrompt = `**输出语言**：\`${targetFile}\` 使用下方变化场景内容的主导语言。
 
 **⏰ 更新时间**: ${currentTime}
@@ -315,7 +326,7 @@ ${triggerSection}
 - **总记忆数**: ${totalProcessed} 条
 - **场景总数**: ${sceneCount} 个
 - **变化场景**: ${changedSceneCount} 个（自上次更新后）
-
+${documentSceneGuide}
 ---
 ${changedScenesContent}
 

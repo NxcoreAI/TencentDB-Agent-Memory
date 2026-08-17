@@ -100,7 +100,7 @@ metadata 字段说明：
 
 请严格按上述 JSON 数组格式输出，不要输出任何额外的 Markdown 代码块修饰符（如 \`\`\`json）或解释文本。`;
 
-export type MemoryPromptMode = "chat" | "code";
+export type MemoryPromptMode = "chat" | "code" | "document";
 
 export const EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT = `你是专业的"工作情境切分与团队共享记忆提取专家"。
 你的任务是分析多人工作消息，判断工作情境切换，并从中提取可在项目团队内共享的结构化工作记忆。
@@ -371,8 +371,72 @@ metadata 字段说明：
 
 请严格按上述 JSON 数组格式输出，不要输出任何额外的 Markdown 代码块修饰符（如 \`\`\`json）或解释文本。`;
 
+export const EXTRACT_DOCUMENT_MEMORIES_SYSTEM_PROMPT = `你是专业的"文档知识记忆提取专家"。
+你的任务是分析一份 md 文档的**分块内容**（每块首行【文档标题 > 标题路径】前缀标明出处），从中提取结构化的文档知识记忆。
+
+这不是对话：没有情境切换，全部分块同属一个以文档标题命名的知识场景。你只需要提取记忆，不需要做情境判断。
+
+**输出语言**：memory \`content\` 使用文档正文的**主导语言**（专有名词保留原文）；JSON 字段名、枚举值、ISO 时间戳保持英文。
+
+### 记忆提取原则
+
+1. 面向长期复用：提取后续任务中能直接使用的知识（事实、方法、任务、资产、规则），跳过目录、页眉页脚、修订记录、纯排版内容。
+2. 独立完整：每条记忆必须脱离原文仍然成立，包含清晰的主体与结论；禁止"如上所述"、"本文档提到"这类指代。
+3. 归纳合并：同一主题分散在多个小节的内容应合并为一条完整记忆（source_message_ids 列出全部相关块 id）。
+4. 忠于原文：只提取文档明确陈述的内容；不要推断、外延或补充文档之外的知识。
+5. 标注来源：source_message_ids 必须只包含【待提取的文档分块】中出现的 message id。
+
+### 支持提取的五类记忆
+
+memory \`type\` 必须从以下枚举中选择（**禁止输出 persona / episodic**）：
+
+1. 工作事实（type: "work_fact"）：文档陈述的事实、约束、决策、状态、术语定义、系统事实。
+   - priority：90-100（关键决策、核心约束）；70-89（一般事实）；<70（细碎内容，直接丢弃）。
+
+2. 工作任务（type: "work_task"）：文档定义的待办、行动项、计划步骤、流程环节。
+   - priority：90-100（有明确 deadline/阻塞的关键任务）；70-89（一般任务）；<70（模糊待办，直接丢弃）。
+   - metadata 可填 {"owner": "...", "deadline": "ISO8601", "status": "todo|doing|done|blocked"}。
+
+3. 工作方法（type: "work_method"）：文档沉淀的 SOP、流程、原则、禁忌、设计思路、判断标准。
+   - priority：90-100（长期可复用的核心方法）；70-89（项目内复用）；<70（一次性操作，直接丢弃）。
+   - metadata 可填 {"scope": "project|team|module|agent|workflow", "method_type": "sop|principle|constraint|anti_pattern|heuristic"}。
+
+4. 工作资产（type: "work_artifact"）：文档本身或其引用的文档、仓库、接口、数据表等资产。
+   - priority：90-100（核心资产）；70-89（一般资产）；<70（临时文件，直接丢弃）。
+   - metadata 可填 {"artifact_type": "doc|pr|issue|repo|branch|design|report|prompt|dataset", "artifact_ref": "链接、ID或名称"}。
+
+5. 全局指令（type: "instruction"）：文档中对 AI/Agent 的行为规则、输出格式要求、协作约定。
+   - 提取句式："文档要求 AI 在处理相关任务时..."
+   - priority：-1（严格死规则）；90-100（核心行为规则）；70-80（重要要求）；<70（临时要求，直接丢弃）。
+
+### 输出格式规范（JSON）
+
+返回且仅返回一个合法的 JSON 数组，包含**一个**以文档标题命名的场景：
+
+[
+  {
+    "scene_name": "文档标题（原样使用，不要改写）",
+    "message_ids": ["全部相关分块的消息ID"],
+    "memories": [
+      {
+        "content": "完整、独立的文档知识记忆陈述",
+        "type": "work_fact|work_task|work_method|work_artifact|instruction",
+        "priority": 80,
+        "source_message_ids": ["消息ID_1", "消息ID_2"],
+        "metadata": {}
+      }
+    ]
+  }
+]
+
+如果整份文档无可提取的知识，也输出场景框架，memories 为空数组。
+
+请严格按上述 JSON 数组格式输出，不要输出任何额外的 Markdown 代码块修饰符（如 \`\`\`json）或解释文本。`;
+
 export function getExtractMemoriesSystemPrompt(mode: MemoryPromptMode = "chat"): string {
-  return mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT : EXTRACT_MEMORIES_SYSTEM_PROMPT;
+  if (mode === "code") return EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT;
+  if (mode === "document") return EXTRACT_DOCUMENT_MEMORIES_SYSTEM_PROMPT;
+  return EXTRACT_MEMORIES_SYSTEM_PROMPT;
 }
 
 // ============================
@@ -385,11 +449,14 @@ export function getExtractMemoriesSystemPrompt(mode: MemoryPromptMode = "chat"):
  * @param newMessages - Messages to extract memories from (with ids and timestamps)
  * @param backgroundMessages - Previous messages for context only (not for extraction)
  * @param previousSceneName - The last known scene name (for continuity)
+ * @param documentTitle - 文档模式：标题（来自 documents 登记行）。给出时切换为
+ *   文档分块提取框架（无背景/无上一情境，语言随文档正文）。
  */
 export function formatExtractionPrompt(params: {
   newMessages: ConversationMessage[];
   backgroundMessages?: ConversationMessage[];
   previousSceneName?: string;
+  documentTitle?: string;
 }): string {
   const { newMessages, backgroundMessages = [], previousSceneName = "无" } = params;
 
@@ -402,6 +469,19 @@ export function formatExtractionPrompt(params: {
   const newText = newMessages
     .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
     .join("\n\n");
+
+  if (params.documentTitle !== undefined) {
+    return `**输出语言**：根据下方"待提取的文档分块"正文的主导语言书写 memory \`content\`（专有名词保留原文）；\`scene_name\` 原样使用文档标题。
+
+【文档标题】：${params.documentTitle}
+
+【说明】：以下是该文档的分块内容。每块首行【…】前缀标明了标题路径与所在行区间，仅用于定位语境，**不是正文的一部分**。请只从这些分块中提取记忆，source_message_ids 只用分块的 message id。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【待提取的文档分块】：
+${newText}`;
+  }
 
   return `**输出语言**：根据下方"待提取的新消息"中 **user 发言**的主导语言书写 \`scene_name\` 和 memory \`content\`（忽略 assistant 回复与专有名词的语言；专有名词保留原文即可）。
 

@@ -95,6 +95,12 @@ export interface MemoryRecord {
   teamId?: string;
   userId?: string;
   agentId?: string;
+  /**
+   * 来源标记（fork 文档子系统）：'document' 时 sourceRef 为 document_id，
+   * 'conversation' 为缺省语义。持久化到 l1_records.source_kind/source_ref。
+   */
+  sourceKind?: string;
+  sourceRef?: string;
 }
 
 /**
@@ -171,6 +177,9 @@ export async function writeMemory(params: {
   teamId?: string;
   userId?: string;
   agentId?: string;
+  /** 来源标记（document 时 ref= document_id），落 source_kind/source_ref 列。 */
+  sourceKind?: string;
+  sourceRef?: string;
   logger?: Logger;
   /** Optional vector store for dual-write (JSONL + vector DB) */
   vectorStore?: IMemoryStore;
@@ -179,7 +188,7 @@ export async function writeMemory(params: {
   /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
   storage?: StorageAdapter;
 }): Promise<MemoryRecord | null> {
-  const { memory, decision, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage } = params;
+  const { memory, decision, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, sourceKind, sourceRef, logger, vectorStore, embeddingService, storage } = params;
 
   if (decision.action === "skip") {
     logger?.debug?.(`${TAG} Skipping memory: ${memory.content.slice(0, 50)}...`);
@@ -239,6 +248,8 @@ export async function writeMemory(params: {
     // behaviour for callers that haven't been updated yet.
     userId: userId || DEFAULT_ISOLATION_ID,
     agentId: agentId || DEFAULT_ISOLATION_ID,
+    sourceKind,
+    sourceRef,
   };
 
   const shardDate = formatLocalDate(new Date());

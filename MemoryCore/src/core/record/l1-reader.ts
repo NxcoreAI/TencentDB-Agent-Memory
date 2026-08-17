@@ -77,7 +77,7 @@ function rowToMemoryRecord(row: L1RecordRow): MemoryRecord {
     type: row.type as MemoryType,
     priority: row.priority,
     scene_name: row.scene_name,
-    source_message_ids: [], // not stored in SQLite (vector search doesn't need them)
+    source_message_ids: parseSourceMessageIds(row.source_message_ids_json),
     metadata,
     timestamps,
     createdAt: row.created_time,
@@ -89,7 +89,20 @@ function rowToMemoryRecord(row: L1RecordRow): MemoryRecord {
     teamId: row.team_id,
     userId: row.user_id,
     agentId: row.agent_id,
+    sourceKind: row.source_kind,
+    sourceRef: row.source_ref,
   };
+}
+
+/** 解析 l1_records.source_message_ids_json（容错：坏 JSON / 缺列 → 空数组）。 */
+export function parseSourceMessageIds(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 // ============================

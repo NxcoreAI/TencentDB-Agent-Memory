@@ -424,7 +424,7 @@ export function createL1Runner(opts: {
       // the oldest L1_BATCH_PROCESS (= N) for actual processing and use the
       // remaining rows merely as a *signal* to detect backlog. See file-level
       // comment on L1_BATCH_PROCESS / L1_BATCH_QUERY for rationale.
-      type FlatMessage = ConversationMessage & { sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; recordedAtMs: number };
+      type FlatMessage = ConversationMessage & { sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; recordedAtMs: number; sourceKind?: string; sourceRef?: string };
       let flat: FlatMessage[] = [];
       let queriedCount = 0;
 
@@ -446,6 +446,8 @@ export function createL1Runner(opts: {
               userId: g.userId,
               agentId: g.agentId,
               recordedAtMs: m.recordedAtMs,
+              sourceKind: g.sourceKind,
+              sourceRef: g.sourceRef,
             });
           }
         }
@@ -520,19 +522,20 @@ export function createL1Runner(opts: {
       const processed = flat.slice(0, sliceEnd);
 
       // ── Step 3: re-group sliced messages by isolation tuple + sessionId (chronological within each group) ──
-      const groupMap = new Map<string, { sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; messages: ConversationMessage[] }>();
+      const groupMap = new Map<string, { sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; sourceKind?: string; sourceRef?: string; messages: ConversationMessage[] }>();
       let maxRecordedAtMs = 0;
       for (const m of processed) {
         if (m.recordedAtMs > maxRecordedAtMs) maxRecordedAtMs = m.recordedAtMs;
         const groupKey = `${m.userId}\u0000${m.agentId}\u0000${m.sessionId}`;
         let g = groupMap.get(groupKey);
         if (!g) {
-          g = { sessionId: m.sessionId, teamId: m.teamId, taskId: m.taskId, userId: m.userId, agentId: m.agentId, messages: [] };
+          // 组来源取首条消息（文档会话 memdoc:* 整组同源）。
+          g = { sessionId: m.sessionId, teamId: m.teamId, taskId: m.taskId, userId: m.userId, agentId: m.agentId, sourceKind: m.sourceKind, sourceRef: m.sourceRef, messages: [] };
           groupMap.set(groupKey, g);
         }
         g.messages.push({ id: m.id, role: m.role, content: m.content, timestamp: m.timestamp });
       }
-      const groups: Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; messages: ConversationMessage[] }> = [];
+      const groups: Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; sourceKind?: string; sourceRef?: string; messages: ConversationMessage[] }> = [];
       for (const group of groupMap.values()) {
         groups.push(group);
       }
@@ -606,6 +609,10 @@ export function createL1Runner(opts: {
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
             model: cfg.extraction.model,
             promptMode: cfg.extraction.promptMode,
+            // 文档会话（memdoc:*）→ 文档模式提炼（fork 文档子系统）。
+            ...(group.sourceKind === "document" && group.sourceRef
+              ? { source: { kind: "document", ref: group.sourceRef } as const }
+              : {}),
             memoryPrompt: l1Prompts.get(memoryPromptResolveKey({
               teamId: group.teamId,
               agentId: group.agentId,

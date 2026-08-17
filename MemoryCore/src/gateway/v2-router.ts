@@ -32,15 +32,16 @@ import { reportRecallMetrics } from "../core/report/metric-tracking-recall.js";
 // ── Zod schemas (validated types + defaults) ──
 import {
   conversationAddRequestSchema,
-  conversationQueryRequestSchema,
-  conversationSearchRequestSchema,
   conversationDeleteRequestSchema,
   conversationCountRequestSchema,
   atomicUpdateRequestSchema,
-  atomicQueryRequestSchema,
-  atomicSearchRequestSchema,
   atomicDeleteRequestSchema,
   atomicCountRequestSchema,
+  conversationQueryRequestSchemaV2,
+  conversationSearchRequestSchemaV2,
+  atomicQueryRequestSchemaV2,
+  atomicSearchRequestSchemaV2,
+  atomicProvenanceRequestSchema,
   scenarioListRequestSchema,
   scenarioReadRequestSchema,
   scenarioWriteRequestSchema,
@@ -161,6 +162,7 @@ const V3_ALLOWED_SUBPATHS = new Set<string>([
   "/atomic/search",
   "/atomic/delete",
   "/atomic/count",
+  "/atomic/provenance",
   "/scenario/ls",
   "/scenario/read",
   "/scenario/write",
@@ -421,6 +423,7 @@ const DATAPLANE_HANDLERS: Record<string, RouteHandler> = {
   "/atomic/search": handleAtomicSearch,
   "/atomic/delete": handleAtomicDelete,
   "/atomic/count": handleAtomicCount,
+  "/atomic/provenance": handleAtomicProvenance,
   "/scenario/ls": handleScenarioLs,
   "/scenario/read": handleScenarioRead,
   "/scenario/write": handleScenarioWrite,
@@ -500,7 +503,10 @@ export async function handleV2Route(
     pathname === "/v3/memory-prompt/setting/list" ||
     pathname === "/v3/memory-prompt/log" ||
     pathname === "/v3/memory-generation-log/list" ||
-    pathname === "/v3/memory-generation-log/get"
+    pathname === "/v3/memory-generation-log/get" ||
+    pathname === "/v3/document/get" ||
+    pathname === "/v3/document/list" ||
+    pathname === "/v3/atomic/provenance"
   );
   if (method !== "POST" && !isPromptRead) return false;
   const isV3 = pathname.startsWith(`${V3_PREFIX}/`);
@@ -513,7 +519,8 @@ export async function handleV2Route(
     pathname.startsWith("/v3/knowledge/") ||
     pathname.startsWith("/v3/chat-memory/") ||
     pathname.startsWith("/v3/memory-prompt/") ||
-    pathname.startsWith("/v3/memory-generation-log/")
+    pathname.startsWith("/v3/memory-generation-log/") ||
+    pathname.startsWith("/v3/document/")
   );
   if (!isV2 && !isV3) return false;
 
@@ -810,9 +817,9 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
 }
 
 async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
-  const parsed = conversationQueryRequestSchema.safeParse(body);
+  const parsed = conversationQueryRequestSchemaV2.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { session_id, time_start, time_end } = parsed.data;
+  const { session_id, time_start, time_end, source_kind, source_ref } = parsed.data;
   const limit = parsed.data.limit ?? 20;
   const offset = parsed.data.offset ?? 0;
 
@@ -834,6 +841,8 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
       taskId: iso?.taskId,
       timeStartMs: time_start ? new Date(time_start).getTime() : undefined,
       timeEndMs: time_end ? new Date(time_end).getTime() : undefined,
+      sourceKind: source_kind,
+      sourceRef: source_ref,
       limit,
       offset,
     });
@@ -848,6 +857,8 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
       role: r.role as ConversationItem["role"],
       content: r.message_text,
       timestamp: r.recorded_at,
+      source_kind: r.source_kind || "conversation",
+      source_ref: r.source_ref || "",
     }));
 
     return successEnvelope<ConversationQueryData>({ messages, total: result.total }, requestId);
@@ -861,6 +872,8 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
   if (iso?.userId) filtered = filtered.filter((r) => r.user_id === iso.userId);
   if (iso?.agentId) filtered = filtered.filter((r) => r.agent_id === iso.agentId);
   if (iso?.taskId) filtered = filtered.filter((r) => r.task_id === iso.taskId);
+  if (source_kind) filtered = filtered.filter((r) => (r.source_kind || "conversation") === source_kind);
+  if (source_ref) filtered = filtered.filter((r) => (r.source_ref || "") === source_ref);
   if (time_start) { const ms = new Date(time_start).getTime(); filtered = filtered.filter((r) => r.timestamp >= ms); }
   if (time_end) { const ms = new Date(time_end).getTime(); filtered = filtered.filter((r) => r.timestamp <= ms); }
   const total = filtered.length;
@@ -875,6 +888,8 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
     role: r.role as ConversationItem["role"],
     content: r.message_text,
     timestamp: r.recorded_at,
+    source_kind: r.source_kind || "conversation",
+    source_ref: r.source_ref || "",
   }));
 
   return successEnvelope<ConversationQueryData>({ messages, total }, requestId);
@@ -913,22 +928,26 @@ async function handleConversationCount(body: unknown, _auth: V2AuthContext, requ
 }
 
 async function handleConversationSearch(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
-  const parsed = conversationSearchRequestSchema.safeParse(body);
+  const parsed = conversationSearchRequestSchemaV2.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { query, session_id } = parsed.data;
+  const { query, session_id, source_kind, source_ref } = parsed.data;
   const limit = parsed.data.limit ?? 5;
 
   const tStart = performance.now();
   // 搜索场景：只使用显式传入的 isolation 维度作为 filter，避免默认 sessionId="default" 错误过滤真实 session 数据。
   // 当请求未传 session_id 时，搜索应跨 session；当传了 session_id 时，由 sessionKey 参数单独过滤。
+  // 来源过滤（fork 文档子系统）：缺省 sourceKind="conversation" 排除文档分块，
+  // 显式传 source_kind="document" 可只搜文档块。
   const iso = deps.requestIsolation;
-  const searchFilter = iso ? {
-    ...(iso.teamId ? { teamId: iso.teamId } : {}),
-    ...(iso.userId ? { userId: iso.userId } : {}),
-    ...(iso.agentId ? { agentId: iso.agentId } : {}),
-    ...(iso.taskId ? { taskId: iso.taskId } : {}),
+  const searchFilter = {
+    ...(iso?.teamId ? { teamId: iso.teamId } : {}),
+    ...(iso?.userId ? { userId: iso.userId } : {}),
+    ...(iso?.agentId ? { agentId: iso.agentId } : {}),
+    ...(iso?.taskId ? { taskId: iso.taskId } : {}),
     // 不传 sessionId：全局搜索不应被默认 sessionId 限制
-  } : undefined;
+    sourceKind: source_kind ?? "conversation",
+    ...(source_ref ? { sourceRef: source_ref } : {}),
+  };
   const result = await executeConversationSearch({
     query,
     limit,
@@ -980,6 +999,8 @@ async function handleConversationSearch(body: unknown, auth: V2AuthContext, requ
 
   const messages: ConversationSearchHit[] = result.results.map((r) => ({
     id: r.id, role: r.role as ConversationSearchHit["role"], content: r.content, timestamp: r.recorded_at, score: r.score,
+    source_kind: r.source_kind ?? "conversation",
+    source_ref: r.source_ref ?? "",
   }));
 
   return successEnvelope<ConversationSearchData>({ messages }, requestId);
@@ -1076,7 +1097,8 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
     type: record.type as any,
     priority: record.priority ?? 50,
     scene_name: background !== undefined ? background : (record.scene_name ?? ""),
-    source_message_ids: [],
+    // 溯源锚点随行保留：手工编辑只改 content/scene，不切断与 L0 依据的关联。
+    source_message_ids: safeParseStringArray(record.source_message_ids_json),
     metadata: parseMetadataJson(record.metadata_json),
     timestamps: record.timestamp_str ? [record.timestamp_str] : [],
     createdAt: record.created_time,
@@ -1088,6 +1110,9 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
     teamId: record.team_id ?? iso?.teamId,
     userId: record.user_id ?? iso?.userId,
     agentId: record.agent_id ?? iso?.agentId,
+    // 来源标记原样回写（文档派生记忆编辑后仍可溯源到 document_id）。
+    sourceKind: record.source_kind,
+    sourceRef: record.source_ref,
   };
 
   const embedding = deps.getEmbedding();
@@ -1111,9 +1136,9 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
 }
 
 async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
-  const parsed = atomicQueryRequestSchema.safeParse(body);
+  const parsed = atomicQueryRequestSchemaV2.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { type, time_start, time_end } = parsed.data;
+  const { type, time_start, time_end, source_kind, source_ref } = parsed.data;
   const limit = parsed.data.limit ?? 20;
   const offset = parsed.data.offset ?? 0;
 
@@ -1128,6 +1153,7 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
     const result = await store.queryL1Paginated({
       type, timeStart: time_start, timeEnd: time_end, limit, offset,
       teamId: iso?.teamId, userId: iso?.userId, agentId: iso?.agentId, taskId: iso?.taskId,
+      sourceKind: source_kind, sourceRef: source_ref,
     });
     const items: AtomicDetail[] = result.rows.map((r) => ({
       id: r.record_id, type: r.type, content: r.content,
@@ -1137,6 +1163,10 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
       user_id: r.user_id,
       agent_id: r.agent_id,
       task_id: r.task_id,
+      session_id: r.session_id || undefined,
+      source_kind: r.source_kind || "conversation",
+      source_ref: r.source_ref || "",
+      source_message_ids: safeParseStringArray(r.source_message_ids_json),
       created_at: r.created_time, updated_at: r.updated_time,
     }));
     return successEnvelope<AtomicQueryData>({ items, total: result.total }, requestId);
@@ -1150,6 +1180,8 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
   if (iso?.userId) filtered = filtered.filter((r) => r.user_id === iso.userId);
   if (iso?.agentId) filtered = filtered.filter((r) => r.agent_id === iso.agentId);
   if (iso?.taskId) filtered = filtered.filter((r) => r.task_id === iso.taskId);
+  if (source_kind) filtered = filtered.filter((r) => (r.source_kind || "conversation") === source_kind);
+  if (source_ref) filtered = filtered.filter((r) => (r.source_ref || "") === source_ref);
   if (time_start) filtered = filtered.filter((r) => r.updated_time >= time_start);
   if (time_end) filtered = filtered.filter((r) => r.updated_time <= time_end);
   const total = filtered.length;
@@ -1162,6 +1194,10 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
     user_id: r.user_id,
     agent_id: r.agent_id,
     task_id: r.task_id,
+    session_id: r.session_id || undefined,
+    source_kind: r.source_kind || "conversation",
+    source_ref: r.source_ref || "",
+    source_message_ids: safeParseStringArray(r.source_message_ids_json),
     created_at: r.created_time, updated_at: r.updated_time,
   }));
 
@@ -1189,24 +1225,127 @@ async function handleAtomicCount(body: unknown, _auth: V2AuthContext, requestId:
   return successEnvelope<CountData>({ total }, requestId);
 }
 
-async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
-  const parsed = atomicSearchRequestSchema.safeParse(body);
+/**
+ * /v3/atomic/provenance — 记忆溯源一站式查询（fork 文档子系统）。
+ *
+ * 输入 memory_id，输出：
+ *   - kind：'conversation' | 'document'（来自 L1 source_kind 列）
+ *   - session / document：来源上下文（文档时含标题与 caller_ref，供 UI 跳原文）
+ *   - anchors：source_message_ids 对应的 L0 行（正文 + 元数据；文档锚点附
+ *     标题路径与行区间，TCVDB 等无 getL0RecordsByIds 的后端返回空数组）
+ */
+async function handleAtomicProvenance(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const parsed = atomicProvenanceRequestSchema.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { query, type } = parsed.data;
+  const { memory_id } = parsed.data;
+
+  const store = deps.getStore();
+  if (!store) return errorEnvelope(503, "Store not available", requestId);
+
+  const rows = await store.queryL1Records({ recordIds: [memory_id] });
+  if (!rows || rows.length === 0) {
+    return errorEnvelope(404, `Atomic note not found: ${memory_id}`, requestId);
+  }
+  const record = rows[0];
+
+  // 隔离校验：与 atomic/update 同规则 —— 请求带 user/agent 维度且与记录不匹配即拒绝。
+  const iso = deps.requestIsolation;
+  if (iso?.userId && record.user_id && record.user_id !== iso.userId) {
+    return errorEnvelope(403, `Atomic note ${memory_id} belongs to a different user`, requestId);
+  }
+  if (iso?.agentId && record.agent_id && record.agent_id !== iso.agentId) {
+    return errorEnvelope(403, `Atomic note ${memory_id} belongs to a different agent`, requestId);
+  }
+
+  const kind = record.source_kind || "conversation";
+  const anchorIds = safeParseStringArray(record.source_message_ids_json);
+
+  // L0 锚点正文（批量取；无实现/已清理 → 空 anchors，仍返回来源上下文）
+  let anchorRows: Array<{ record_id: string; role: string; message_text: string; recorded_at: string; session_id: string }> = [];
+  if (anchorIds.length > 0 && store.getL0RecordsByIds) {
+    try {
+      anchorRows = await store.getL0RecordsByIds(anchorIds);
+    } catch (err) {
+      deps.logger.warn(`${TAG} getL0RecordsByIds failed for provenance of ${memory_id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // 文档锚点补充：标题路径 + 行区间（按 message_id 对齐 document_chunks）
+  let chunkByMessage = new Map<string, { heading_path: string; line_start: number; line_end: number; chunk_index: number }>();
+  if (kind === "document" && record.source_ref && store.getDocumentChunks) {
+    try {
+      const chunks = await store.getDocumentChunks(record.source_ref);
+      chunkByMessage = new Map(chunks.map((c) => [c.message_id, { heading_path: c.heading_path, line_start: c.line_start, line_end: c.line_end, chunk_index: c.chunk_index }]));
+    } catch {
+      // chunks 不可用时仅缺定位信息，不影响主响应
+    }
+  }
+
+  const anchors = anchorRows.map((r) => {
+    const chunk = chunkByMessage.get(r.record_id);
+    return {
+      message_id: r.record_id,
+      role: r.role,
+      content: r.message_text,
+      recorded_at: r.recorded_at,
+      session_id: r.session_id,
+      source_kind: kind,
+      ...(chunk ? { heading_path: chunk.heading_path, line_start: chunk.line_start, line_end: chunk.line_end, chunk_index: chunk.chunk_index } : {}),
+    };
+  });
+
+  // 来源上下文：文档 → 登记行；会话 → session 标识
+  let document: Record<string, unknown> | undefined;
+  if (kind === "document" && record.source_ref && store.getDocument) {
+    try {
+      const doc = await store.getDocument(record.source_ref);
+      if (doc) {
+        document = {
+          document_id: doc.document_id,
+          title: doc.title,
+          caller_ref: doc.caller_ref,
+          version: doc.version,
+          session_id: doc.session_id,
+        };
+      }
+    } catch {
+      // 登记行缺失（被清理）→ document 字段缺省
+    }
+  }
+
+  return successEnvelope({
+    memory_id: record.record_id,
+    type: record.type,
+    content: record.content,
+    kind,
+    session: kind === "conversation" ? { session_id: record.session_id, session_key: record.session_key } : undefined,
+    document,
+    anchor_message_ids: anchorIds,
+    anchors,
+  }, requestId);
+}
+
+async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const parsed = atomicSearchRequestSchemaV2.safeParse(body);
+  if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
+  const { query, type, source_kind, source_ref } = parsed.data;
   const limit = parsed.data.limit ?? 5;
 
   const tStart = performance.now();
   // L1 召回为 agent 维度（跨 session）：filter 只取 team/user/agent/task，
-  // **不带 sessionId**，否则会把其它 session 写入的 L1 记忆过滤掉，导致
+  // **不带 sessionId**，否则会把其它 session 写入的 L1 记录过滤掉，导致
   // 新会话里召不回历史记忆（与 conversation/search 的处理保持一致）。
+  // 可选 source_kind/source_ref：来源过滤（如只召回文档派生记忆）。
   const iso = deps.requestIsolation;
-  const searchFilter = iso ? {
-    ...(iso.teamId ? { teamId: iso.teamId } : {}),
-    ...(iso.userId ? { userId: iso.userId } : {}),
-    ...(iso.agentId ? { agentId: iso.agentId } : {}),
-    ...(iso.taskId ? { taskId: iso.taskId } : {}),
+  const searchFilter = {
+    ...(iso?.teamId ? { teamId: iso.teamId } : {}),
+    ...(iso?.userId ? { userId: iso.userId } : {}),
+    ...(iso?.agentId ? { agentId: iso.agentId } : {}),
+    ...(iso?.taskId ? { taskId: iso.taskId } : {}),
     // 不传 sessionId：L1 召回应跨 session（agent 维度）
-  } : undefined;
+    ...(source_kind ? { sourceKind: source_kind } : {}),
+    ...(source_ref ? { sourceRef: source_ref } : {}),
+  };
   const result = await executeMemorySearch({
     query, limit, type,
     filter: searchFilter,
@@ -1564,6 +1703,17 @@ function parseMetadataJson(raw: string | undefined): MemoryRecord["metadata"] {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as MemoryRecord["metadata"] : {};
   } catch {
     return {};
+  }
+}
+
+/** 解析 L1 行的 source_message_ids_json（溯源锚点 id 列表；坏值容错为空）。 */
+function safeParseStringArray(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
   }
 }
 

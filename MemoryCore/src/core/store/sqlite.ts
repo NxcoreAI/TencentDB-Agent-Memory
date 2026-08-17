@@ -57,6 +57,9 @@ import type {
   MemoryContentClearResult,
   AuditEntry,
   AuditQueryFilter,
+  DocumentRecord,
+  DocumentChunkRow,
+  DocumentQueryFilter,
 } from "./types.js";
 import { DEFAULT_ISOLATION_ID, rowMatchesIsolation } from "./types.js";
 import { SKILLS_DDL, SKILL_FTS_DDL } from "../skill/skill-store-ddl.js";
@@ -120,6 +123,10 @@ export interface L0VectorSearchResult {
   recorded_at: string;
   /** Original message timestamp (epoch ms) */
   timestamp: number;
+  /** 'conversation'（缺省/存量）| 'document'。 */
+  source_kind?: string;
+  /** document 时为 document_id。 */
+  source_ref?: string;
 }
 
 export interface L0RecordRow {
@@ -358,6 +365,10 @@ export interface L0FtsSearchResult {
   score: number;
   recorded_at: string;
   timestamp: number;
+  /** 'conversation'（缺省/存量）| 'document'。 */
+  source_kind?: string;
+  /** document 时为 document_id。 */
+  source_ref?: string;
 }
 
 // ============================
@@ -641,7 +652,10 @@ export class VectorStore implements IMemoryStore {
         timestamp_end TEXT DEFAULT '',
         created_time TEXT DEFAULT '',
         updated_time TEXT DEFAULT '',
-        metadata_json TEXT DEFAULT '{}'
+        metadata_json TEXT DEFAULT '{}',
+        source_kind TEXT NOT NULL DEFAULT 'conversation',
+        source_ref TEXT NOT NULL DEFAULT '',
+        source_message_ids_json TEXT NOT NULL DEFAULT '[]'
       )
     `);
 
@@ -652,6 +666,10 @@ export class VectorStore implements IMemoryStore {
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+    // 文档子系统来源列（fork）：存量行默认 conversation / [] 语义即正确，无需回填。
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'conversation'"); } catch { /* exists */ }
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''"); } catch { /* exists */ }
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN source_message_ids_json TEXT NOT NULL DEFAULT '[]'"); } catch { /* exists */ }
     this.db.prepare("UPDATE l1_records SET team_id = ? WHERE team_id = '' OR team_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l1_records SET user_id = ? WHERE user_id = '' OR user_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l1_records SET agent_id = ? WHERE agent_id = '' OR agent_id IS NULL").run(DEFAULT_ISOLATION_ID);
@@ -675,6 +693,8 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_agent_session ON l1_records(user_id, agent_id, session_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_user_updated  ON l1_records(user_id, updated_time)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_agent_updated ON l1_records(agent_id, updated_time)");
+    // 文档子系统：反向溯源 queryL1({sourceRef}) 走此索引。
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_source_ref ON l1_records(source_ref)");
 
     // Vector virtual table (cosine distance) — only created when dimensions > 0.
     // When provider="none", dimensions=0 and vec0 tables are deferred until a
@@ -698,8 +718,9 @@ export class VectorStore implements IMemoryStore {
         record_id, content, type, priority, scene_name, session_key, session_id,
         team_id, task_id, version, timestamp_str, timestamp_start, timestamp_end,
         created_time, updated_time, metadata_json,
-        user_id, agent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        user_id, agent_id,
+        source_kind, source_ref, source_message_ids_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(record_id) DO UPDATE SET
         content=excluded.content,
         type=excluded.type,
@@ -714,7 +735,10 @@ export class VectorStore implements IMemoryStore {
         updated_time=excluded.updated_time,
         metadata_json=excluded.metadata_json,
         user_id=excluded.user_id,
-        agent_id=excluded.agent_id
+        agent_id=excluded.agent_id,
+        source_kind=excluded.source_kind,
+        source_ref=excluded.source_ref,
+        source_message_ids_json=excluded.source_message_ids_json
     `);
 
     if (this.dimensions > 0) {
@@ -725,7 +749,8 @@ export class VectorStore implements IMemoryStore {
 
     this.stmtGetMeta = this.db.prepare(`
       SELECT content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id,
-             version, timestamp_str, timestamp_start, timestamp_end, metadata_json
+             version, timestamp_str, timestamp_start, timestamp_end, metadata_json,
+             source_kind, source_ref, source_message_ids_json
       FROM l1_records WHERE record_id = ?
     `);
 
@@ -756,7 +781,9 @@ export class VectorStore implements IMemoryStore {
         role TEXT NOT NULL DEFAULT '',
         message_text TEXT NOT NULL,
         recorded_at TEXT DEFAULT '',
-        timestamp INTEGER DEFAULT 0
+        timestamp INTEGER DEFAULT 0,
+        source_kind TEXT NOT NULL DEFAULT 'conversation',
+        source_ref TEXT NOT NULL DEFAULT ''
       )
     `);
 
@@ -770,6 +797,9 @@ export class VectorStore implements IMemoryStore {
     try { this.db.exec("ALTER TABLE l0_conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l0_conversations ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l0_conversations ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
+    // 文档子系统来源列（fork）：存量行默认 conversation 即正确语义，无需回填。
+    try { this.db.exec("ALTER TABLE l0_conversations ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'conversation'"); } catch { /* exists */ }
+    try { this.db.exec("ALTER TABLE l0_conversations ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''"); } catch { /* exists */ }
     this.db.prepare("UPDATE l0_conversations SET team_id = ? WHERE team_id = '' OR team_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l0_conversations SET user_id = ? WHERE user_id = '' OR user_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l0_conversations SET agent_id = ? WHERE agent_id = '' OR agent_id IS NULL").run(DEFAULT_ISOLATION_ID);
@@ -816,8 +846,9 @@ export class VectorStore implements IMemoryStore {
     this.stmtL0UpsertMeta = this.db.prepare(`
       INSERT INTO l0_conversations (
         record_id, session_key, session_id, team_id, task_id, role, message_text, recorded_at, timestamp,
-        user_id, agent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        user_id, agent_id,
+        source_kind, source_ref
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(record_id) DO UPDATE SET
         message_text=excluded.message_text,
         recorded_at=excluded.recorded_at,
@@ -825,7 +856,9 @@ export class VectorStore implements IMemoryStore {
         team_id=excluded.team_id,
         task_id=excluded.task_id,
         user_id=excluded.user_id,
-        agent_id=excluded.agent_id
+        agent_id=excluded.agent_id,
+        source_kind=excluded.source_kind,
+        source_ref=excluded.source_ref
     `);
 
     if (this.dimensions > 0) {
@@ -835,7 +868,8 @@ export class VectorStore implements IMemoryStore {
     this.stmtL0DeleteMeta = this.db.prepare("DELETE FROM l0_conversations WHERE record_id = ?");
 
     this.stmtL0GetMeta = this.db.prepare(`
-      SELECT session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp
+      SELECT session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp,
+             source_kind, source_ref
       FROM l0_conversations WHERE record_id = ?
     `);
 
@@ -861,7 +895,8 @@ export class VectorStore implements IMemoryStore {
     // time) because L1 cursor uses recorded_at semantics. ISO 8601 string
     // comparison preserves time order.
     this.stmtL0QueryAll = this.db.prepare(`
-      SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp
+      SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp,
+             source_kind, source_ref
       FROM l0_conversations
       WHERE session_key = ?
       ORDER BY recorded_at ASC
@@ -869,7 +904,8 @@ export class VectorStore implements IMemoryStore {
     `);
 
     this.stmtL0QueryAfter = this.db.prepare(`
-      SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp
+      SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp,
+             source_kind, source_ref
       FROM l0_conversations
       WHERE session_key = ? AND recorded_at > ?
       ORDER BY recorded_at ASC
@@ -973,6 +1009,43 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_entity_tasks_team_status ON entity_tasks(team_id, status)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_entity_knowledge_team ON entity_knowledge(team_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_entity_knowledge_team_type ON entity_knowledge(team_id, type)");
+
+    // ── Document registry（fork 文档子系统）──
+    // 登记行 + 分块锚点。原文不入 MemoryCore（调用方资产层持有），
+    // 这里只存 caller_ref（如 EverRoom file_id）+ content_sha256 用于
+    // 身份判定（title+caller_ref 命中 → 升版）与内容去重。
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS documents (
+        document_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        caller_ref TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        session_id TEXT NOT NULL,
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        team_id TEXT NOT NULL DEFAULT 'default',
+        user_id TEXT NOT NULL DEFAULT 'default',
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    // 身份判定索引：(title, caller_ref) 命中即升版。
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_documents_identity ON documents(caller_ref, title)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_documents_isolation ON documents(team_id, user_id, agent_id)");
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS document_chunks (
+        document_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '',
+        line_start INTEGER NOT NULL DEFAULT 0,
+        line_end INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (document_id, chunk_index)
+      )
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_document_chunks_message ON document_chunks(message_id)");
 
     // ── Memory Audit (修改审计) ──
     // 设计要点（per user 决策）：
@@ -1198,7 +1271,8 @@ export class VectorStore implements IMemoryStore {
     const l1QueryCols = `record_id, content, type, priority, scene_name, session_key, session_id,
       team_id, task_id, user_id, agent_id, version,
       timestamp_str, timestamp_start, timestamp_end,
-      created_time, updated_time, metadata_json`;
+      created_time, updated_time, metadata_json,
+      source_kind, source_ref, source_message_ids_json`;
 
     this.stmtQueryBySessionId = this.db.prepare(`
       SELECT ${l1QueryCols} FROM l1_records
@@ -1398,6 +1472,10 @@ export class VectorStore implements IMemoryStore {
           JSON.stringify(record.metadata),
           (record as MemoryRecord & { userId?: string }).userId || DEFAULT_ISOLATION_ID,
           (record as MemoryRecord & { agentId?: string }).agentId || DEFAULT_ISOLATION_ID,
+          // 来源列（fork 文档子系统）：conversation 缺省语义。
+          record.sourceKind || "conversation",
+          record.sourceRef || "",
+          JSON.stringify(record.source_message_ids ?? []),
         );
 
         if (!skipVec) {
@@ -1759,6 +1837,15 @@ export class VectorStore implements IMemoryStore {
         conditions.push("updated_time <= ?");
         params.push(filter.timeEnd);
       }
+      if (filter?.sourceKind !== undefined) {
+        // 老行 source_kind 落缺省 'conversation'（ALTER 带默认值），无需 COALESCE。
+        conditions.push("source_kind = ?");
+        params.push(filter.sourceKind);
+      }
+      if (filter?.sourceRef !== undefined) {
+        conditions.push("source_ref = ?");
+        params.push(filter.sourceRef);
+      }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
       const row = this.db
@@ -1827,6 +1914,9 @@ export class VectorStore implements IMemoryStore {
       if (filter?.userId !== undefined) rows = rows.filter((r) => r.user_id === filter.userId);
       if (filter?.agentId !== undefined) rows = rows.filter((r) => r.agent_id === filter.agentId);
       if (taskId !== undefined) rows = rows.filter((r) => r.task_id === taskId);
+      // 来源过滤（fork 文档子系统）：反向溯源按 sourceRef 查，列表按 sourceKind 分区。
+      if (filter?.sourceKind !== undefined) rows = rows.filter((r) => (r.source_kind || "conversation") === filter.sourceKind);
+      if (filter?.sourceRef !== undefined) rows = rows.filter((r) => r.source_ref === filter.sourceRef);
 
       this.logger?.info(
         `${TAG} [L1-query] filter={sessionKey=${sessionKey ?? "(all)"}, sessionId=${sessionId ?? "(all)"}, teamId=${filter?.teamId ?? "(all)"}, userId=${filter?.userId ?? "(all)"}, agentId=${filter?.agentId ?? "(all)"}, taskId=${taskId ?? "(all)"}, updatedAfter=${updatedAfter ?? "(none)"}}, ` +
@@ -1891,6 +1981,9 @@ export class VectorStore implements IMemoryStore {
           record.timestamp,
           (record as L0Record & { userId?: string }).userId || DEFAULT_ISOLATION_ID,
           (record as L0Record & { agentId?: string }).agentId || DEFAULT_ISOLATION_ID,
+          // 来源列（fork 文档子系统）：conversation 缺省语义。
+          record.sourceKind || "conversation",
+          record.sourceRef || "",
         );
 
         if (!skipVec) {
@@ -2053,6 +2146,8 @@ export class VectorStore implements IMemoryStore {
               message_text: string;
               recorded_at: string;
               timestamp: number;
+              source_kind?: string;
+              source_ref?: string;
             }
           | undefined;
 
@@ -2083,6 +2178,8 @@ export class VectorStore implements IMemoryStore {
           score,
           recorded_at: meta.recorded_at,
           timestamp: meta.timestamp ?? 0,
+          source_kind: meta.source_kind ?? "conversation",
+          source_ref: meta.source_ref ?? "",
         });
       }
 
@@ -2423,6 +2520,8 @@ export class VectorStore implements IMemoryStore {
         message_text: r.message_text as string,
         recorded_at: (r.recorded_at as string) || "",
         timestamp: (r.timestamp as number) || 0,
+        source_kind: (r.source_kind as string) || "conversation",
+        source_ref: (r.source_ref as string) || "",
       }));
     } catch (err) {
       this.logger?.warn(
@@ -2443,7 +2542,7 @@ export class VectorStore implements IMemoryStore {
     sessionKey: string,
     afterRecordedAtMs?: number,
     limit = 50,
-  ): Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; recordedAtMs: number }> }> {
+  ): Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; sourceKind?: string; sourceRef?: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; recordedAtMs: number }> }> {
     if (this.degraded) {
       this.logger?.warn(`${TAG} [L0-query-grouped] SKIPPED (degraded mode)`);
       return [];
@@ -2458,6 +2557,8 @@ export class VectorStore implements IMemoryStore {
         taskId?: string;
         userId: string;
         agentId: string;
+        sourceKind?: string;
+        sourceRef?: string;
         messages: Array<{ id: string; role: string; content: string; timestamp: number; recordedAtMs: number }>;
       }>();
       for (const row of rows) {
@@ -2469,7 +2570,13 @@ export class VectorStore implements IMemoryStore {
         const groupKey = `${teamId ?? ""}\u0000${userId}\u0000${agentId}\u0000${sid}\u0000${taskId ?? ""}`;
         let group = groupMap.get(groupKey);
         if (!group) {
-          group = { sessionId: sid, teamId, taskId, userId, agentId, messages: [] };
+          // 文档会话整组同源，取首行来源标记即可（fork 文档子系统）。
+          group = {
+            sessionId: sid, teamId, taskId, userId, agentId,
+            sourceKind: row.source_kind || "conversation",
+            sourceRef: row.source_ref || "",
+            messages: [],
+          };
           groupMap.set(groupKey, group);
         }
         group.messages.push({
@@ -2482,7 +2589,7 @@ export class VectorStore implements IMemoryStore {
       }
 
       // Convert to array, sorted by earliest message timestamp
-      const groups: Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; recordedAtMs: number }> }> = [];
+      const groups: Array<{ sessionId: string; teamId?: string; taskId?: string; userId: string; agentId: string; sourceKind?: string; sourceRef?: string; messages: Array<{ id: string; role: string; content: string; timestamp: number; recordedAtMs: number }> }> = [];
       for (const group of groupMap.values()) {
         if (group.messages.length > 0) {
           groups.push(group);
@@ -2592,6 +2699,14 @@ export class VectorStore implements IMemoryStore {
         conditions.push("timestamp <= ?");
         params.push(filter.timeEndMs);
       }
+      if (filter.sourceKind !== undefined) {
+        conditions.push("source_kind = ?");
+        params.push(filter.sourceKind);
+      }
+      if (filter.sourceRef !== undefined) {
+        conditions.push("source_ref = ?");
+        params.push(filter.sourceRef);
+      }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -2601,7 +2716,7 @@ export class VectorStore implements IMemoryStore {
       const total = countRow?.cnt ?? 0;
 
       // Fetch page
-      const dataSql = `SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp FROM l0_conversations ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+      const dataSql = `SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp, source_kind, source_ref FROM l0_conversations ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
       const rows = this.db.prepare(dataSql).all(...params, filter.limit, filter.offset) as unknown as L0QueryRow[];
 
       return { rows, total };
@@ -2655,6 +2770,14 @@ export class VectorStore implements IMemoryStore {
         conditions.push("updated_time <= ?");
         params.push(filter.timeEnd);
       }
+      if (filter.sourceKind !== undefined) {
+        conditions.push("source_kind = ?");
+        params.push(filter.sourceKind);
+      }
+      if (filter.sourceRef !== undefined) {
+        conditions.push("source_ref = ?");
+        params.push(filter.sourceRef);
+      }
 
       const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -2665,7 +2788,7 @@ export class VectorStore implements IMemoryStore {
 
       // Fetch page — must include user_id / agent_id so callers can enforce
       // isolation in downstream filters / Coordinator candidate pool.
-      const dataSql = `SELECT record_id, content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id, version, timestamp_str, timestamp_start, timestamp_end, created_time, updated_time, metadata_json FROM l1_records ${where} ORDER BY updated_time DESC LIMIT ? OFFSET ?`;
+      const dataSql = `SELECT record_id, content, type, priority, scene_name, session_key, session_id, team_id, task_id, user_id, agent_id, version, timestamp_str, timestamp_start, timestamp_end, created_time, updated_time, metadata_json, source_kind, source_ref, source_message_ids_json FROM l1_records ${where} ORDER BY updated_time DESC LIMIT ? OFFSET ?`;
       const rows = this.db.prepare(dataSql).all(...params, filter.limit, filter.offset) as unknown as L1RecordRow[];
 
       return { rows, total };
@@ -3150,7 +3273,7 @@ export class VectorStore implements IMemoryStore {
     if (this.degraded || !this.ftsAvailable) return [];
     try {
       const retrieveLimit = filter ? Math.max(limit * 5, limit) : limit;
-      const rows = this.stmtL1FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
+      const rawRows = this.stmtL1FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
         record_id: string;
         content: string;
         type: string;
@@ -3169,6 +3292,15 @@ export class VectorStore implements IMemoryStore {
         metadata_json: string;
         rank: number;
       }>;
+
+      // 同 searchL0Fts：l1_fts 镜像表无 source 列，按主键回 l1_records 补齐
+      // 供来源过滤（atomic/search source_kind）。
+      const rows = rawRows.map((r) => {
+        const meta = this.stmtGetMeta.get(r.record_id) as
+          | { source_kind?: string; source_ref?: string }
+          | undefined;
+        return { ...r, source_kind: meta?.source_kind ?? "conversation", source_ref: meta?.source_ref ?? "" };
+      });
 
       return rows
         .filter((r) => rowMatchesIsolation(r, filter))
@@ -3213,7 +3345,7 @@ export class VectorStore implements IMemoryStore {
     if (this.degraded || !this.ftsAvailable) return [];
     try {
       const retrieveLimit = filter ? Math.max(limit * 5, limit) : limit;
-      const rows = this.stmtL0FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
+      const rawRows = this.stmtL0FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
         record_id: string;
         message_text: string;
         session_key: string;
@@ -3227,6 +3359,15 @@ export class VectorStore implements IMemoryStore {
         timestamp: number;
         rank: number;
       }>;
+
+      // l0_fts 镜像表不带 source 列（FTS5 无 ALTER，重建代价高）：按主键回
+      // l0_conversations 补 source_kind/source_ref，供来源过滤与响应标注。
+      const rows = rawRows.map((r) => {
+        const meta = this.stmtL0GetMeta.get(r.record_id) as
+          | { source_kind?: string; source_ref?: string }
+          | undefined;
+        return { ...r, source_kind: meta?.source_kind ?? "conversation", source_ref: meta?.source_ref ?? "" };
+      });
 
       return rows
         .filter((r) => rowMatchesIsolation(r, filter))
@@ -3244,6 +3385,8 @@ export class VectorStore implements IMemoryStore {
           score: bm25RankToScore(r.rank),
           recorded_at: r.recorded_at,
           timestamp: r.timestamp ?? 0,
+          source_kind: r.source_kind,
+          source_ref: r.source_ref,
         }));
     } catch (err) {
       this.logger?.warn(
@@ -3466,6 +3609,217 @@ export class VectorStore implements IMemoryStore {
       nativeHybridSearch: false,
       sparseVectors: false,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // Document registry（fork 文档子系统）
+  // ─────────────────────────────────────────────────────────
+
+  private documentFromRow(row: any): DocumentRecord {
+    return {
+      document_id: String(row.document_id ?? ""),
+      title: String(row.title ?? ""),
+      caller_ref: String(row.caller_ref ?? ""),
+      content_sha256: String(row.content_sha256 ?? ""),
+      version: Number(row.version ?? 1),
+      session_id: String(row.session_id ?? ""),
+      chunk_count: Number(row.chunk_count ?? 0),
+      team_id: String(row.team_id ?? "default"),
+      user_id: String(row.user_id ?? "default"),
+      agent_id: String(row.agent_id ?? "default"),
+      created_at: String(row.created_at ?? ""),
+      updated_at: String(row.updated_at ?? ""),
+    };
+  }
+
+  upsertDocument(doc: DocumentRecord): boolean {
+    if (this.degraded) return false;
+    try {
+      this.db.prepare(`
+        INSERT INTO documents
+          (document_id, title, caller_ref, content_sha256, version, session_id,
+           chunk_count, team_id, user_id, agent_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+          title=excluded.title,
+          caller_ref=excluded.caller_ref,
+          content_sha256=excluded.content_sha256,
+          version=excluded.version,
+          session_id=excluded.session_id,
+          chunk_count=excluded.chunk_count,
+          team_id=excluded.team_id,
+          user_id=excluded.user_id,
+          agent_id=excluded.agent_id,
+          updated_at=excluded.updated_at
+      `).run(
+        doc.document_id, doc.title, doc.caller_ref, doc.content_sha256,
+        doc.version, doc.session_id, doc.chunk_count,
+        doc.team_id || "default", doc.user_id || "default", doc.agent_id || "default",
+        doc.created_at, doc.updated_at,
+      );
+      return true;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] upsertDocument failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  getDocument(documentId: string): DocumentRecord | null {
+    if (this.degraded) return null;
+    try {
+      const row = this.db.prepare("SELECT * FROM documents WHERE document_id = ?").get(documentId) as any;
+      return row ? this.documentFromRow(row) : null;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] getDocument failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  findDocuments(filter: DocumentQueryFilter): DocumentRecord[] {
+    if (this.degraded) return [];
+    try {
+      const conditions: string[] = [];
+      const params: SQLInputValue[] = [];
+      if (filter.teamId !== undefined) { conditions.push("team_id = ?"); params.push(filter.teamId); }
+      if (filter.userId !== undefined) { conditions.push("user_id = ?"); params.push(filter.userId); }
+      if (filter.agentId !== undefined) { conditions.push("agent_id = ?"); params.push(filter.agentId); }
+      // 身份判定：同 caller 下同名文档（title+caller_ref 同时给 → 一条合并条件）。
+      if (filter.callerRef !== undefined && filter.title !== undefined) {
+        conditions.push("caller_ref = ? AND title = ?");
+        params.push(filter.callerRef, filter.title);
+      } else {
+        if (filter.callerRef !== undefined) { conditions.push("caller_ref = ?"); params.push(filter.callerRef); }
+        if (filter.title !== undefined) { conditions.push("title = ?"); params.push(filter.title); }
+      }
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+      const offset = Math.max(filter.offset ?? 0, 0);
+      const rows = this.db.prepare(
+        `SELECT * FROM documents ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      ).all(...params, limit, offset) as any[];
+      return rows.map((r) => this.documentFromRow(r));
+    } catch (err) {
+      this.logger?.warn(`[sqlite] findDocuments failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  deleteDocument(documentId: string): boolean {
+    if (this.degraded) return false;
+    try {
+      const result = this.db.prepare("DELETE FROM documents WHERE document_id = ?").run(documentId);
+      return ((result as any)?.changes ?? 0) > 0;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] deleteDocument failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  insertDocumentChunks(chunks: DocumentChunkRow[]): boolean {
+    if (this.degraded) return false;
+    if (chunks.length === 0) return true;
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO document_chunks
+          (document_id, chunk_index, message_id, heading_path, line_start, line_end)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_id, chunk_index) DO UPDATE SET
+          message_id=excluded.message_id,
+          heading_path=excluded.heading_path,
+          line_start=excluded.line_start,
+          line_end=excluded.line_end
+      `);
+      this.db.exec("BEGIN");
+      try {
+        for (const c of chunks) {
+          stmt.run(c.document_id, c.chunk_index, c.message_id, c.heading_path ?? "", c.line_start ?? 0, c.line_end ?? 0);
+        }
+        this.db.exec("COMMIT");
+      } catch (err) {
+        try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+        throw err;
+      }
+      return true;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] insertDocumentChunks failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  getDocumentChunks(documentId: string): DocumentChunkRow[] {
+    if (this.degraded) return [];
+    try {
+      const rows = this.db.prepare(
+        "SELECT document_id, chunk_index, message_id, heading_path, line_start, line_end FROM document_chunks WHERE document_id = ? ORDER BY chunk_index ASC",
+      ).all(documentId) as any[];
+      return rows.map((r) => ({
+        document_id: String(r.document_id ?? ""),
+        chunk_index: Number(r.chunk_index ?? 0),
+        message_id: String(r.message_id ?? ""),
+        heading_path: String(r.heading_path ?? ""),
+        line_start: Number(r.line_start ?? 0),
+        line_end: Number(r.line_end ?? 0),
+      }));
+    } catch (err) {
+      this.logger?.warn(`[sqlite] getDocumentChunks failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  deleteDocumentChunks(documentId: string): boolean {
+    if (this.degraded) return false;
+    try {
+      this.db.exec("BEGIN");
+      try {
+        this.db.prepare("DELETE FROM document_chunks WHERE document_id = ?").run(documentId);
+        this.db.exec("COMMIT");
+      } catch (err) {
+        try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+        throw err;
+      }
+      return true;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] deleteDocumentChunks failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /** 按主键批量取 L0 行（溯源锚点正文 / 搜索结果来源标注）。500/批防 SQL 变量上限。 */
+  getL0RecordsByIds(recordIds: string[]): L0QueryRow[] {
+    if (this.degraded || recordIds.length === 0) return [];
+    try {
+      const out: L0QueryRow[] = [];
+      const BATCH = 500;
+      const stmtFor = (n: number) => this.db.prepare(
+        `SELECT record_id, session_key, session_id, team_id, task_id, user_id, agent_id, role, message_text, recorded_at, timestamp, source_kind, source_ref
+         FROM l0_conversations WHERE record_id IN (${Array.from({ length: n }, () => "?").join(",")})`,
+      );
+      for (let i = 0; i < recordIds.length; i += BATCH) {
+        const batch = recordIds.slice(i, i + BATCH);
+        const rows = stmtFor(batch.length).all(...batch) as any[];
+        for (const r of rows) {
+          out.push({
+            record_id: String(r.record_id ?? ""),
+            session_key: String(r.session_key ?? ""),
+            session_id: String(r.session_id ?? ""),
+            team_id: String(r.team_id ?? ""),
+            task_id: String(r.task_id ?? ""),
+            user_id: String(r.user_id ?? ""),
+            agent_id: String(r.agent_id ?? ""),
+            role: String(r.role ?? ""),
+            message_text: String(r.message_text ?? ""),
+            recorded_at: String(r.recorded_at ?? ""),
+            timestamp: Number(r.timestamp ?? 0),
+            source_kind: String(r.source_kind ?? "conversation"),
+            source_ref: String(r.source_ref ?? ""),
+          });
+        }
+      }
+      return out;
+    } catch (err) {
+      this.logger?.warn(`[sqlite] getL0RecordsByIds failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   // ─────────────────────────────────────────────────────────

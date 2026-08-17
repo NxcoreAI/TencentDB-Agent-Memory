@@ -34,6 +34,11 @@ export interface MemoryGenerationLog {
   output_refs: MemoryGenerationRef[];
   model?: string;
   prompt_mode?: string;
+  /**
+   * 本次产出的记忆来源（fork 文档子系统）：'conversation'（缺省/存量）|
+   * 'document'（l1 文档模式提炼时记录）。l2/l3 聚合来源混合，不填。
+   */
+  source_kind?: string;
   started_at_ms: number;
   finished_at_ms: number;
   latency_ms: number;

@@ -11,8 +11,12 @@
 // Type definitions
 // ============================
 
-/** Prompt family for L1-L3 memory pipeline. */
-export type MemoryPromptMode = "chat" | "code";
+/**
+ * Prompt family for L1-L3 memory pipeline.
+ * "document"：md 文档导入链路（fork 文档子系统）——由 L0 组来源标记驱动，
+ * 不经 config 显式配置；类型限定为 work_* + instruction。
+ */
+export type MemoryPromptMode = "chat" | "code" | "document";
 
 /** Capture settings — controls L0 conversation recording. */
 export interface CaptureConfig {

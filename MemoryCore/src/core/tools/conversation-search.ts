@@ -31,6 +31,10 @@ export interface ConversationSearchResultItem {
   content: string;
   score: number;
   recorded_at: string;
+  /** 来源标记（fork 文档子系统）：'conversation'（缺省）| 'document'。 */
+  source_kind?: string;
+  /** document 时为 document_id。 */
+  source_ref?: string;
 }
 
 export interface ConversationSearchResult {
@@ -158,6 +162,8 @@ export async function executeConversationSearch(params: {
       content: r.message_text,
       score: r.score,
       recorded_at: r.recorded_at,
+      source_kind: r.source_kind ?? "conversation",
+      source_ref: r.source_ref ?? "",
     }));
 
     // Apply session filter
@@ -191,10 +197,15 @@ export async function executeConversationSearch(params: {
         return ftsResults.map((r) => ({
           id: r.record_id,
           session_key: r.session_key,
+          session_id: r.session_id,
+          user_id: r.user_id,
+          agent_id: r.agent_id,
           role: r.role,
           content: r.message_text,
           score: r.score,
           recorded_at: r.recorded_at,
+          source_kind: r.source_kind ?? "conversation",
+          source_ref: r.source_ref ?? "",
         }));
       } catch (err) {
         logger?.warn?.(
@@ -227,6 +238,8 @@ export async function executeConversationSearch(params: {
           content: r.message_text,
           score: r.score,
           recorded_at: r.recorded_at,
+          source_kind: r.source_kind ?? "conversation",
+          source_ref: r.source_ref ?? "",
         }));
       } catch (err) {
         logger?.warn?.(

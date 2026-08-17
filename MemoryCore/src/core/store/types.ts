@@ -21,9 +21,14 @@ import type { Logger } from "../types.js";
 import type { IsolationFilter } from "./isolation.js";
 import type { MemoryPromptStore } from "../memory-prompt/types.js";
 import type { MemoryGenerationRefStore } from "../memory-generation-log/types.js";
+import type {
+  DocumentRecord,
+  DocumentChunkRow,
+  DocumentQueryFilter,
+} from "../document/types.js";
 
 // Re-export so consumers can import everything from types.ts
-export type { MemoryRecord, EmbeddingProviderInfo };
+export type { MemoryRecord, EmbeddingProviderInfo, DocumentRecord, DocumentChunkRow, DocumentQueryFilter };
 
 // Re-export isolation primitives so all store consumers import from here.
 export type {
@@ -109,6 +114,10 @@ export interface L1QueryFilter {
   agentId?: string;
   /** Only return records with updated_time strictly after this ISO 8601 UTC timestamp. */
   updatedAfter?: string;
+  /** 来源过滤：'conversation' | 'document'（反向溯源按 sourceRef 查）。 */
+  sourceKind?: string;
+  /** 来源引用过滤（document 时为 document_id）。 */
+  sourceRef?: string;
 }
 
 /** Row shape returned by L1 query methods. */
@@ -131,6 +140,12 @@ export interface L1RecordRow {
   created_time: string;
   updated_time: string;
   metadata_json: string;
+  /** 来源标记：'conversation'（默认/存量）| 'document'。可选：TCVDB 后端无此列。 */
+  source_kind?: string;
+  /** document 时为 document_id，conversation 为空。可选：TCVDB 后端无此列。 */
+  source_ref?: string;
+  /** JSON 数组字符串：本条记忆依据的 L0 message id 列表（溯源锚点）。可选：TCVDB 后端无此列。 */
+  source_message_ids_json?: string;
 }
 
 // ============================
@@ -159,6 +174,12 @@ export interface L0Record {
   recordedAt: string;
   /** Original message timestamp (epoch ms). */
   timestamp: number;
+  /**
+   * 来源标记（fork 文档子系统）：'document' 时 ref 为 document_id。
+   * 缺省 = conversation（存量语义）。持久化到 source_kind/source_ref 列。
+   */
+  sourceKind?: string;
+  sourceRef?: string;
 }
 
 /** Result from an L0 vector similarity search. */
@@ -176,6 +197,10 @@ export interface L0SearchResult {
   score: number;
   recorded_at: string;
   timestamp: number;
+  /** 'conversation'（缺省/存量）| 'document'。可选：后端未实现来源列时缺省。 */
+  source_kind?: string;
+  /** document 时为 document_id。可选：后端未实现来源列时缺省。 */
+  source_ref?: string;
 }
 
 /** Result from an L0 FTS keyword search. */
@@ -193,6 +218,10 @@ export interface L0FtsResult {
   score: number;
   recorded_at: string;
   timestamp: number;
+  /** 'conversation'（缺省/存量）| 'document'。可选：后端未实现来源列时缺省。 */
+  source_kind?: string;
+  /** document 时为 document_id。可选：后端未实现来源列时缺省。 */
+  source_ref?: string;
 }
 
 /** Raw L0 row returned by query methods (used by L1 runner). */
@@ -208,6 +237,10 @@ export interface L0QueryRow {
   message_text: string;
   recorded_at: string;
   timestamp: number;
+  /** 'conversation'（默认/存量）| 'document'。可选：TCVDB 后端无此列。 */
+  source_kind?: string;
+  /** document 时为 document_id。可选：TCVDB 后端无此列。 */
+  source_ref?: string;
 }
 
 /** L0 messages grouped by session ID (for L1 runner). */
@@ -217,6 +250,9 @@ export interface L0SessionGroup {
   userId: string;
   agentId: string;
   taskId?: string;
+  /** 组内首条消息的来源标记（文档会话整组同源）。 */
+  sourceKind?: string;
+  sourceRef?: string;
   messages: Array<{
     id: string;
     role: string;
@@ -311,6 +347,9 @@ export interface L0CountFilter {
   timeStartMs?: number;
   /** Timestamp <= (epoch ms, inclusive). */
   timeEndMs?: number;
+  /** 来源过滤：'conversation' | 'document'。 */
+  sourceKind?: string;
+  sourceRef?: string;
 }
 
 export interface L0PaginatedFilter extends L0CountFilter {
@@ -342,6 +381,9 @@ export interface L1CountFilter {
   timeStart?: string;
   /** Filter by updated_time <= (ISO 8601). */
   timeEnd?: string;
+  /** 来源过滤：'conversation' | 'document'。 */
+  sourceKind?: string;
+  sourceRef?: string;
 }
 
 export interface L1PaginatedFilter extends L1CountFilter {
@@ -705,6 +747,26 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
   // ── Memory Audit（修改审计；optional 让 store 可以选择不实现）──
   appendAudit?(entry: AuditEntry): MaybePromise<void>;
   queryAudit?(filter: AuditQueryFilter): MaybePromise<AuditEntry[]>;
+
+  // ── Document source subsystem（fork 特性；sqlite 实现，其他后端可选）──
+  //
+  // 文档登记与分块锚点。原文不入库（调用方资产），这里只存登记行 +
+  // L0 message_id 锚点。未实现的后端返回 undefined / 不定义方法，
+  // document-service 据此拒绝文档导入。
+
+  upsertDocument?(doc: DocumentRecord): MaybePromise<boolean>;
+  getDocument?(documentId: string): MaybePromise<DocumentRecord | null>;
+  findDocuments?(filter: DocumentQueryFilter): MaybePromise<DocumentRecord[]>;
+  deleteDocument?(documentId: string): MaybePromise<boolean>;
+  insertDocumentChunks?(chunks: DocumentChunkRow[]): MaybePromise<boolean>;
+  getDocumentChunks?(documentId: string): MaybePromise<DocumentChunkRow[]>;
+  deleteDocumentChunks?(documentId: string): MaybePromise<boolean>;
+
+  /**
+   * 按主键批量取 L0 行（溯源锚点正文 / 搜索结果来源标注用）。
+   * 未实现的后端返回 undefined。
+   */
+  getL0RecordsByIds?(recordIds: string[]): MaybePromise<L0QueryRow[]>;
 }
 
 // ============================
