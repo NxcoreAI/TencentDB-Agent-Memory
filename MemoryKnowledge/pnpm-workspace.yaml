@@ -1,0 +1,7 @@
+# pnpm v11 依赖构建脚本白名单（默认全禁，需显式放行）
+# 本文件同时充当 workspace 锚点——有了它 pnpm 不会再向上识别 EverRoom 根 workspace，
+# 安装时无需再加 --ignore-workspace。
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
