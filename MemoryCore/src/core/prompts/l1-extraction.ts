@@ -386,9 +386,9 @@ export const EXTRACT_DOCUMENT_MEMORIES_SYSTEM_PROMPT = `你是专业的"文档�
 4. 忠于原文：只提取文档明确陈述的内容；不要推断、外延或补充文档之外的知识。
 5. 标注来源：source_message_ids 必须只包含【待提取的文档分块】中出现的 message id。
 
-### 支持提取的五类记忆
+### 支持提取的四类记忆
 
-memory \`type\` 必须从以下枚举中选择（**禁止输出 persona / episodic**）：
+memory \`type\` 必须从以下枚举中选择（**禁止输出 persona / episodic / instruction**）：
 
 1. 工作事实（type: "work_fact"）：文档陈述的事实、约束、决策、状态、术语定义、系统事实。
    - priority：90-100（关键决策、核心约束）；70-89（一般事实）；<70（细碎内容，直接丢弃）。
@@ -405,10 +405,6 @@ memory \`type\` 必须从以下枚举中选择（**禁止输出 persona / episod
    - priority：90-100（核心资产）；70-89（一般资产）；<70（临时文件，直接丢弃）。
    - metadata 可填 {"artifact_type": "doc|pr|issue|repo|branch|design|report|prompt|dataset", "artifact_ref": "链接、ID或名称"}。
 
-5. 全局指令（type: "instruction"）：文档中对 AI/Agent 的行为规则、输出格式要求、协作约定。
-   - 提取句式："文档要求 AI 在处理相关任务时..."
-   - priority：-1（严格死规则）；90-100（核心行为规则）；70-80（重要要求）；<70（临时要求，直接丢弃）。
-
 ### 输出格式规范（JSON）
 
 返回且仅返回一个合法的 JSON 数组，包含**一个**以文档标题命名的场景：
@@ -420,7 +416,7 @@ memory \`type\` 必须从以下枚举中选择（**禁止输出 persona / episod
     "memories": [
       {
         "content": "完整、独立的文档知识记忆陈述",
-        "type": "work_fact|work_task|work_method|work_artifact|instruction",
+        "type": "work_fact|work_task|work_method|work_artifact",
         "priority": 80,
         "source_message_ids": ["消息ID_1", "消息ID_2"],
         "metadata": {}

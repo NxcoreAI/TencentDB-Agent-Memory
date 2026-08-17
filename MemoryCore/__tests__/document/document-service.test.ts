@@ -216,7 +216,7 @@ describe("queryL1Records recordIds 过滤（溯源回归）", () => {
       ...base,
       id: "m-doc",
       content: "文档事实（docfact）",
-      type: "instruction",
+      type: "work_fact",
       scene_name: "部署手册",
       source_message_ids: ["c1"],
       sessionKey: "memdoc:doc-1:v1",

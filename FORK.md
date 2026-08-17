@@ -27,6 +27,7 @@
 | `version` 后缀 `-everroom.N` | 标记 fork 版本，便于区分上游 |
 | 文档记忆子系统：l0/l1 `source_kind`/`source_ref` 列 + `documents` 登记表/分块锚点表（`core/document/`），`/v3/document/import|get|list|delete`，`/v3/atomic/provenance`，query/search 的 `source_kind` 过滤 | md 文档一等记忆来源 + 双向溯源（EverRoom `docs/memory-md-source-plan.md`）。原文不落盘（只存 caller_ref 与内容指纹）；TCVDB 后端不加列不实现 document 方法，走 503 守卫 |
 | L2/L3 排除文档派生原子：`createL2Runner` 查询后过滤 `source_kind='document'`（纯文档批次不触 LLM、游标照推进）；`markL1ExtractionComplete` 新增 `personaVisibleExtracted` 参数，文档派生 stored 数不计入 `memories_since_last_persona` | 文档原子只服务 L1 召回与溯源，不进 L2 场景块、不催更 L3 画像（L3 内容本身只从场景块生成，L2 闸门即内容闸门）；回归测试 `__tests__/pipeline/l2-l3-doc-exclusion.test.ts` |
+| 文档模式类型限定收紧为 work_*：提炼 prompt 枚举去掉 instruction，提取后过滤加拦 instruction（与 persona/episodic 同列丢弃） | instruction 是对话链路的"用户指令"类型，不从文档提取；文档中的行为规则归 work_method（constraint/anti_pattern）；回归测试 `__tests__/record/l1-doc-type-filter.test.ts`（含会话模式不受影响的对照） |
 | 基线包含本地修复 commit `93f904d`（事实提取 prompt 修复） | 业务需要的上游未合入修改 |
 
 ### MemoryKnowledge/

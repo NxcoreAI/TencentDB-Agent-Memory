@@ -118,7 +118,7 @@ export async function extractL1Memories(params: {
     promptMode?: MemoryPromptMode;
     /**
      * 来源标记（fork 文档子系统）。kind="document" 时强制文档模式：
-     * scene_name=文档标题、类型限定 work_*+instruction（persona/episodic 丢弃）、
+     * scene_name=文档标题、类型限定 work_*（persona/episodic/instruction 丢弃）、
      * 无 previousSceneName、写 source_kind/source_ref 列。
      */
     source?: MemorySource;
@@ -244,8 +244,9 @@ export async function extractL1Memories(params: {
         logger?.warn?.(`${TAG} Skipping memory with invalid type "${mem.type}"`);
         continue;
       }
-      if (isDocument && (memType === "persona" || memType === "episodic")) {
-        // 文档类型限定集（用户拍板）：只留 work_* + instruction。
+      if (isDocument && (memType === "persona" || memType === "episodic" || memType === "instruction")) {
+        // 文档类型限定集（用户拍板 2026-08-18）：只留 work_*。instruction 是对话链路
+        // 的"用户指令"类型，不从文档提取（文档里的行为规则归 work_method）。
         logger?.debug?.(`${TAG} Document mode: dropping ${memType} memory "${mem.content.slice(0, 40)}..."`);
         continue;
       }

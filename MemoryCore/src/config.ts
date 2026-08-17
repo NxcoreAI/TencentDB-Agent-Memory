@@ -14,7 +14,7 @@
 /**
  * Prompt family for L1-L3 memory pipeline.
  * "document"：md 文档导入链路（fork 文档子系统）——由 L0 组来源标记驱动，
- * 不经 config 显式配置；类型限定为 work_* + instruction。
+ * 不经 config 显式配置；类型限定为 work_*。
  */
 export type MemoryPromptMode = "chat" | "code" | "document";
 
