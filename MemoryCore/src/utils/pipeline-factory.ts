@@ -580,6 +580,9 @@ export function createL1Runner(opts: {
 
       let totalExtracted = 0;
       let totalStored = 0;
+      // fork 文档子系统：文档派生的 stored 原子不计入 L3 触发计数
+      // （memories_since_last_persona），避免文档导入催更画像。
+      let docStored = 0;
       let lastSceneName: string | undefined;
       const profileScopes = new Set<string>();
       const l1PromptTargets = groups.map((group) => ({
@@ -632,6 +635,9 @@ export function createL1Runner(opts: {
 
         totalExtracted += l1Result.extractedCount;
         totalStored += l1Result.storedCount;
+        if (group.sourceKind === "document") {
+          docStored += l1Result.storedCount;
+        }
         if (l1Result.storedCount > 0) {
           // L2/L3 output is team+agent scoped, but each L2 extraction input must
           // stay bounded to the source session that just produced L1. Encode the
@@ -652,9 +658,15 @@ export function createL1Runner(opts: {
       // Use maxRecordedAtMs (write time) of the **processed** slice as cursor —
       // always positive, TCVDB-safe. Boundary alignment guarantees we will not
       // skip same-ms siblings on the next round.
-      await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName);
+      await checkpoint.markL1ExtractionComplete(
+        sessionKey,
+        totalStored,
+        maxRecordedAtMs || undefined,
+        lastSceneName,
+        totalStored - docStored,
+      );
       logger.info(
-        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
+        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored}${docStored > 0 ? ` (doc-derived=${docStored}, excluded from L3 trigger)` : ""} (${groups.length} group(s))`,
       );
 
       return { processedCount: totalMessages, storedCount: totalStored, hasMore, hasFullBacklog, profileScopes: Array.from(profileScopes) };
@@ -729,10 +741,11 @@ export function createL2Runner(opts: {
     }
 
     let records: Array<{ content: string; created_at: string; id: string; updatedAt: string; teamId?: string; userId?: string; agentId?: string; sessionId?: string; taskId?: string }>;
+    let memRecords: Array<{ id: string; updatedAt: string }> = [];
 
     if (vectorStore && !vectorStore.isDegraded()) {
       const { queryMemoryRecords } = await import("../core/record/l1-reader.js");
-      const memRecords = await queryMemoryRecords(vectorStore, profileFilter ? {
+      const queried = await queryMemoryRecords(vectorStore, profileFilter ? {
         teamId: profileFilter.teamId,
         userId: profileFilter.userId,
         agentId: profileFilter.agentId,
@@ -742,6 +755,7 @@ export function createL2Runner(opts: {
         sessionKey,
         updatedAfter: cursor,
       }, logger);
+      memRecords = queried;
 
       if (memRecords.length === 0) {
         logger.debug?.(
@@ -750,11 +764,31 @@ export function createL2Runner(opts: {
         return { skipped: true };
       }
 
+      // fork 文档子系统：L2 场景块只消费会话派生原子。文档派生原子（source_kind='document'）
+      // 不进 L2 —— L3 persona 又只从场景块生成，因此这里同时是 L3 内容侧的闸门。
+      const sceneRecords = memRecords.filter((r) => (r.sourceKind ?? "conversation") !== "document");
+      const excludedDocCount = memRecords.length - sceneRecords.length;
+      if (excludedDocCount > 0) {
+        logger.debug?.(
+          `${TAG} [L2] Excluded ${excludedDocCount}/${memRecords.length} document-derived L1 record(s) from scene extraction (session=${sessionKey})`,
+        );
+      }
+
+      if (sceneRecords.length === 0) {
+        // 纯文档批次：无场景可提炼，但游标必须推进到本批最大 updated_at，
+        // 否则这批文档行会在之后每次 L2 运行中被反复重查。
+        const latestCursor = memRecords.reduce((latest, r) => (r.updatedAt > latest ? r.updatedAt : latest), "");
+        logger.debug?.(
+          `${TAG} [L2] Batch is all document-derived (${memRecords.length} record(s)), scene extraction skipped, cursor advanced to ${latestCursor}`,
+        );
+        return { latestCursor: latestCursor || undefined };
+      }
+
       logger.debug?.(
-        `${TAG} [L2] Incremental query returned ${memRecords.length} record(s) (session=${sessionKey})`,
+        `${TAG} [L2] Incremental query returned ${memRecords.length} record(s), ${sceneRecords.length} scene-eligible (session=${sessionKey})`,
       );
 
-      records = memRecords.map((r) => ({
+      records = sceneRecords.map((r) => ({
         content: r.content,
         created_at: r.createdAt,
         id: r.id,
@@ -925,7 +959,8 @@ export function createL2Runner(opts: {
     }
 
     if (processedTotal > 0) {
-      const latestCursor = records.reduce((latest, r) => r.updatedAt > latest ? r.updatedAt : latest, "");
+      // 游标按全量批次（含被排除的文档行）推进，避免晚于会话行的文档行被反复重查。
+      const latestCursor = memRecords.reduce((latest, r) => (r.updatedAt > latest ? r.updatedAt : latest), "");
       logger.debug?.(`${TAG} [L2] Extraction complete: processed=${processedTotal}, latestCursor=${latestCursor}`);
       return { latestCursor: latestCursor || undefined };
     }

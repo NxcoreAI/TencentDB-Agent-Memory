@@ -612,12 +612,16 @@ export class CheckpointManager {
    *
    * @param cursorRecordedAtMs - The max recorded_at epoch ms of processed L0 messages.
    *   This becomes the new `last_l1_cursor` value (recorded_at semantics, not conversation timestamp).
+   * @param personaVisibleExtracted - fork 文档子系统：计入 `memories_since_last_persona`
+   *   的提取数（文档派生原子应为 0，避免文档导入催更 L3 画像）。缺省时与
+   *   memoriesExtracted 一致（存量调用方语义不变）。
    */
   async markL1ExtractionComplete(
     sessionKey: string,
     memoriesExtracted: number,
     cursorRecordedAtMs?: number,
     lastSceneName?: string,
+    personaVisibleExtracted?: number,
   ): Promise<void> {
     let regressed = false;
     await this.mutate((cp) => {
@@ -639,7 +643,7 @@ export class CheckpointManager {
         state.last_scene_name = lastSceneName;
       }
       cp.total_memories_extracted += memoriesExtracted;
-      cp.memories_since_last_persona += memoriesExtracted;
+      cp.memories_since_last_persona += personaVisibleExtracted ?? memoriesExtracted;
     });
     if (regressed) {
       this.logger.warn?.(
