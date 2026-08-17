@@ -1910,6 +1910,13 @@ export class VectorStore implements IMemoryStore {
       // shape (notably L2 profile queries use teamId+agentId+updatedAfter
       // without sessionKey). Apply them in memory to keep the statement matrix
       // bounded and to match queryL1Paginated semantics.
+      if (filter?.recordIds !== undefined && filter.recordIds.length > 0) {
+        // 按主键集合过滤（VDB 后端映射 documentIds；sqlite 在内存过滤）。
+        // 溯源（atomic/provenance 按 memory_id 反查）依赖它精确命中，忽略会导致
+        // 调用方拿到 rows[0] 的任意记录。
+        const wanted = new Set(filter.recordIds);
+        rows = rows.filter((r) => wanted.has(r.record_id));
+      }
       if (filter?.teamId !== undefined) rows = rows.filter((r) => r.team_id === filter.teamId);
       if (filter?.userId !== undefined) rows = rows.filter((r) => r.user_id === filter.userId);
       if (filter?.agentId !== undefined) rows = rows.filter((r) => r.agent_id === filter.agentId);

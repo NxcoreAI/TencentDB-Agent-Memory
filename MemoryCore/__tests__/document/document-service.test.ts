@@ -200,3 +200,44 @@ describe("deleteDocument", () => {
       .rejects.toMatchObject({ code: "not_found" });
   });
 });
+
+describe("queryL1Records recordIds 过滤（溯源回归）", () => {
+  it("recordIds 精确命中且不串行：溯源按 memory_id 反查不能拿到别的记录", () => {
+    const store = makeStore();
+    const base = {
+      priority: 80,
+      metadata: {} as Record<string, never>,
+      timestamps: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    };
+    store.upsertL1({
+      ...base,
+      id: "m-doc",
+      content: "文档事实（docfact）",
+      type: "instruction",
+      scene_name: "部署手册",
+      source_message_ids: ["c1"],
+      sessionKey: "memdoc:doc-1:v1",
+      sessionId: "memdoc:doc-1:v1",
+    } as never, undefined);
+    store.upsertL1({
+      ...base,
+      id: "m-chat",
+      content: "会话情景（chatfact）",
+      type: "episodic",
+      scene_name: "闲聊",
+      source_message_ids: ["s1"],
+      sessionKey: "chat-1",
+      sessionId: "chat-1",
+    } as never, undefined);
+
+    // 全表两条；按 id 反查各命中一条；未知 id 返回空（溯源 404 的前提）
+    expect(store.queryL1Records()).toHaveLength(2);
+    expect(store.queryL1Records({ recordIds: ["m-doc"] }).map((r) => r.record_id)).toEqual(["m-doc"]);
+    expect(store.queryL1Records({ recordIds: ["m-chat"] }).map((r) => r.record_id)).toEqual(["m-chat"]);
+    expect(store.queryL1Records({ recordIds: ["m-missing"] })).toEqual([]);
+    store.close();
+  });
+});

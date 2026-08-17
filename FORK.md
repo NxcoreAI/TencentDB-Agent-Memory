@@ -25,6 +25,7 @@
 | `bin/memory-gateway.mjs` + package.json 的 `bin`/`exports`/`files` 条目 | 提供可 spawn 的 HTTP gateway 启动入口（等价于 `node --import tsx src/gateway/server.ts`），含 Windows `--import` file:// URL 修复 |
 | 移除 `prepack` 脚本 | pnpm 安装 git 依赖时不装 devDependencies，`npm run build` 必然失败；EverRoom 直接从 `src` 经 tsx 运行，不需要 `dist` |
 | `version` 后缀 `-everroom.N` | 标记 fork 版本，便于区分上游 |
+| 文档记忆子系统：l0/l1 `source_kind`/`source_ref` 列 + `documents` 登记表/分块锚点表（`core/document/`），`/v3/document/import|get|list|delete`，`/v3/atomic/provenance`，query/search 的 `source_kind` 过滤 | md 文档一等记忆来源 + 双向溯源（EverRoom `docs/memory-md-source-plan.md`）。原文不落盘（只存 caller_ref 与内容指纹）；TCVDB 后端不加列不实现 document 方法，走 503 守卫 |
 | 基线包含本地修复 commit `93f904d`（事实提取 prompt 修复） | 业务需要的上游未合入修改 |
 
 ### MemoryKnowledge/
@@ -35,6 +36,7 @@
 | `src/store/wiki-service.ts` 路径校验用 `path.sep` 前缀比较 | win32 下 `resolve()` 产出反斜杠路径，硬编码 `"/"` 前缀会把所有合法路径误判为 traversal |
 | `tsx` 移入 dependencies | 同 MemoryCore：git 依赖不装 devDeps，EverRoom supervisor 需要 `--import tsx` 跑源码 |
 | `version` 后缀 `-everroom.N` | 同上 |
+| `pnpm-workspace.yaml`（构建脚本白名单 + workspace 锚点） | 同 MemoryCore 侧：默认全禁、显式放行 better-sqlite3/esbuild/protobufjs；锚定 workspace 避免 pnpm 向上识别 EverRoom 根 |
 
 ### 仓库级
 

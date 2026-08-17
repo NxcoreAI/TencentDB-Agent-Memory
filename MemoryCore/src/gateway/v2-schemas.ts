@@ -17,6 +17,17 @@ import { DEFAULT_ISOLATION_ID } from "../core/store/types.js";
 // Re-export all generated schemas as-is
 // ============================
 
+// fork 文档子系统的 V2 覆盖（见下方 "Override: source filters"）需要在本地引用
+// 这四个基线 schema——`export { x } from` 是纯再导出，不产生本地绑定（Node/tsx
+// 直跑 ESM 时会 ReferenceError；vitest 的 esbuild 转换会额外生成 import 绑定，
+// 掩盖了这个问题）。这里显式 import 出本地绑定。
+import {
+  conversationQueryRequestSchema,
+  conversationSearchRequestSchema,
+  atomicQueryRequestSchema,
+  atomicSearchRequestSchema,
+} from "./generated/schemas.js";
+
 export {
   apiResponseEnvelopeSchema,
   conversationRoleSchema,
@@ -208,9 +219,13 @@ export type AtomicQueryRequestV2 = z.infer<typeof atomicQueryRequestSchemaV2>;
 export const atomicSearchRequestSchemaV2 = atomicSearchRequestSchema.and(sourceFilterShape);
 export type AtomicSearchRequestV2 = z.infer<typeof atomicSearchRequestSchemaV2>;
 
-/** /v3/atomic/provenance：按 memory_id 反查来源（会话/文档）与 L0 依据锚点。 */
+/** /v3/atomic/provenance：按 memory_id 反查来源（会话/文档）与 L0 依据锚点。
+ *  隔离三元组仅作调用方兼容的可选透传（memory_id 全局唯一）。 */
 export const atomicProvenanceRequestSchema = z.strictObject({
   memory_id: z.string().trim().min(1).max(128),
+  team_id: z.string().trim().min(1).max(256).optional(),
+  user_id: z.string().trim().min(1).max(256).optional(),
+  agent_id: z.string().trim().min(1).max(256).optional(),
 });
 export type AtomicProvenanceRequest = z.infer<typeof atomicProvenanceRequestSchema>;
 

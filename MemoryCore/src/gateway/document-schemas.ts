@@ -29,13 +29,23 @@ export const documentImportRequestSchema = z.strictObject({
 });
 export type DocumentImportRequest = z.infer<typeof documentImportRequestSchema>;
 
+/** 隔离三元组：与召回隔离对齐。get/delete 按 document_id 全局定位（身份键
+ *  本身含隔离维度），三元组仅作调用方兼容的可选透传。 */
+const isolationPassthrough = {
+  team_id: z.string().trim().min(1).max(256).optional(),
+  user_id: z.string().trim().min(1).max(256).optional(),
+  agent_id: z.string().trim().min(1).max(256).optional(),
+};
+
 export const documentDeleteRequestSchema = z.strictObject({
   document_id: z.string().trim().min(1).max(128),
+  ...isolationPassthrough,
 });
 export type DocumentDeleteRequest = z.infer<typeof documentDeleteRequestSchema>;
 
 export const documentGetRequestSchema = z.strictObject({
   document_id: z.string().trim().min(1).max(128),
+  ...isolationPassthrough,
 });
 export type DocumentGetRequest = z.infer<typeof documentGetRequestSchema>;
 
