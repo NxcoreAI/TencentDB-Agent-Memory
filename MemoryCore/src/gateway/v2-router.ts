@@ -1158,6 +1158,7 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
     const items: AtomicDetail[] = result.rows.map((r) => ({
       id: r.record_id, type: r.type, content: r.content,
       background: r.scene_name || undefined,
+      scene_name: r.scene_name || undefined,
       version: r.version ?? 0,
       team_id: r.team_id,
       user_id: r.user_id,
@@ -1189,6 +1190,7 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
   const items: AtomicDetail[] = page.map((r) => ({
     id: r.record_id, type: r.type, content: r.content,
     background: r.scene_name || undefined,
+    scene_name: r.scene_name || undefined,
     version: r.version ?? 0,
     team_id: r.team_id,
     user_id: r.user_id,
@@ -1328,7 +1330,7 @@ async function handleAtomicProvenance(body: unknown, _auth: V2AuthContext, reque
 async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
   const parsed = atomicSearchRequestSchemaV2.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { query, type, source_kind, source_ref } = parsed.data;
+  const { query, type, source_kind, source_ref, time_start, time_end } = parsed.data;
   const limit = parsed.data.limit ?? 5;
 
   const tStart = performance.now();
@@ -1348,6 +1350,8 @@ async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId:
   };
   const result = await executeMemorySearch({
     query, limit, type,
+    timeStartMs: time_start ? new Date(time_start).getTime() : undefined,
+    timeEndMs: time_end ? new Date(time_end).getTime() : undefined,
     filter: searchFilter,
     vectorStore: deps.getStore(),
     embeddingService: deps.getEmbedding(),
@@ -1406,6 +1410,7 @@ async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId:
   const items: AtomicSearchHit[] = result.results.map((r) => ({
     id: r.id, type: r.type, content: r.content,
     background: r.scene_name || undefined,
+    scene_name: r.scene_name || undefined,
     version: r.version ?? 0,
     team_id: r.team_id,
     user_id: r.user_id,

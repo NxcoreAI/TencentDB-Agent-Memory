@@ -1,16 +1,17 @@
 /**
- * L2/L3 排除文档派生原子（fork 文档子系统）。
+ * 文档派生原子在 L2/L3 的语义（fork 文档子系统）。
  *
- * 决策（2026-08-18）：source_kind='document' 的 L1 原子——
- *   - 不进 L2 场景块（createL2Runner 查询后过滤；纯文档批次仍推进游标）
- *   - 不催更 L3（memories_since_last_persona 不计入文档派生 stored 数；
- *     persona 内容本身只从场景块生成，无需单独闸门）
+ * 决策演进：
+ *   2026-08-18（第一版）：L2 与 L3 触发计数都排除文档派生原子。
+ *   2026-08-18（再修订）：**L2 恢复消费文档派生原子**——文档知识照常参与场景组织；
+ *   仅 L3 触发计数（memories_since_last_persona）仍排除文档派生 stored 数，
+ *   避免批量导文档催更画像（persona 内容只从场景块生成，随自然重生成纳入）。
  *
  * 用真实 VectorStore（dimensions=0，FTS-only）+ 捕获提示词的假 LLMRunner，
  * 不触真实 LLM。
  */
 
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,7 +62,7 @@ function l1Record(overrides: Partial<MemoryRecord> & Pick<MemoryRecord, "id" | "
   };
 }
 
-/** 假 L2 LLMRunner：记录收到的提示词，返回空文本（不写场景文件 → empty extraction）。 */
+/** 假 L2 LLMRunner：记录收到的提示词，返回空文本（不写场景文件 → 依赖预置场景块避免 emptyExtraction）。 */
 function makeCapturingRunner(): { runner: LLMRunner; prompts: string[] } {
   const prompts: string[] = [];
   const runner: LLMRunner = {
@@ -71,6 +72,13 @@ function makeCapturingRunner(): { runner: LLMRunner; prompts: string[] } {
     },
   };
   return { runner, prompts };
+}
+
+/** 预置一个场景块：L2 输出按 team+agent 作用域分目录 profiles/<scope>/scene_blocks/。 */
+function seedSceneFile(dataDir: string): void {
+  const scopeDir = path.join(dataDir, "profiles", encodeURIComponent("team:default|agent:default"));
+  fs.mkdirSync(path.join(scopeDir, "scene_blocks"), { recursive: true });
+  fs.writeFileSync(path.join(scopeDir, "scene_blocks", "deploy-rhythm.md"), "# 部署节奏\n\n用户偏好夜间部署。\n", "utf-8");
 }
 
 // createL2Runner 只读 cfg.persona.{model, promptMode, maxScenes, sceneBackupCount}
@@ -97,16 +105,11 @@ afterAll(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
-describe("createL2Runner 文档派生原子排除", () => {
-  it("混合批次：只有会话派生原子进入场景提取提示词", async () => {
+describe("createL2Runner 恢复消费文档派生原子", () => {
+  it("混合批次：会话与文档派生原子都进入场景提取提示词", async () => {
     const store = makeStore();
     const dataDir = makeDataDir();
-    // 预置一个场景块：让本批提取后 scene_index 非空（否则走 emptyExtraction→skipped，
-    // 游标不返回，那是上游对「LLM 空跑」的既有语义，与本测试无关）。
-    // L2 输出按 team+agent 作用域分目录：profiles/<scope>/scene_blocks/
-    const scopeDir = path.join(dataDir, "profiles", encodeURIComponent("team:default|agent:default"));
-    fs.mkdirSync(path.join(scopeDir, "scene_blocks"), { recursive: true });
-    fs.writeFileSync(path.join(scopeDir, "scene_blocks", "deploy-rhythm.md"), "# 部署节奏\n\n用户偏好夜间部署。\n", "utf-8");
+    seedSceneFile(dataDir);
     store.upsertL1(
       l1Record({ id: "m-chat-1", content: "用户偏好夜间部署窗口-chatmark", type: "work_fact", sourceKind: "conversation" }),
       undefined,
@@ -130,15 +133,14 @@ describe("createL2Runner 文档派生原子排除", () => {
 
     expect(prompts.length).toBe(1);
     expect(prompts[0]).toContain("用户偏好夜间部署窗口-chatmark");
-    expect(prompts[0]).not.toContain("m-doc-1");
-    expect(prompts[0]).not.toContain("nexcore/everroom-docmark");
-    // 游标按全量批次推进（晚于会话行的文档行不应被反复重查）
+    expect(prompts[0]).toContain("nexcore/everroom-docmark");
     expect(result && typeof result === "object" && "latestCursor" in result && result.latestCursor).toBeTruthy();
   });
 
-  it("纯文档批次：不触 LLM，游标仍推进", async () => {
+  it("纯文档批次：照常触 LLM、游标照推进", async () => {
     const store = makeStore();
     const dataDir = makeDataDir();
+    seedSceneFile(dataDir);
     const docUpdatedAt = "2026-08-18T10:00:00.000Z";
     store.upsertL1(
       l1Record({
@@ -164,8 +166,9 @@ describe("createL2Runner 文档派生原子排除", () => {
 
     const result = await l2("sess-l2-test");
 
-    expect(prompts.length).toBe(0);
-    expect(result).toEqual({ latestCursor: docUpdatedAt });
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain("纯文档派生原子-doconlymark");
+    expect(result && typeof result === "object" && "latestCursor" in result && result.latestCursor).toBeTruthy();
   });
 });
 

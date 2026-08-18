@@ -764,31 +764,13 @@ export function createL2Runner(opts: {
         return { skipped: true };
       }
 
-      // fork 文档子系统：L2 场景块只消费会话派生原子。文档派生原子（source_kind='document'）
-      // 不进 L2 —— L3 persona 又只从场景块生成，因此这里同时是 L3 内容侧的闸门。
-      const sceneRecords = memRecords.filter((r) => (r.sourceKind ?? "conversation") !== "document");
-      const excludedDocCount = memRecords.length - sceneRecords.length;
-      if (excludedDocCount > 0) {
-        logger.debug?.(
-          `${TAG} [L2] Excluded ${excludedDocCount}/${memRecords.length} document-derived L1 record(s) from scene extraction (session=${sessionKey})`,
-        );
-      }
-
-      if (sceneRecords.length === 0) {
-        // 纯文档批次：无场景可提炼，但游标必须推进到本批最大 updated_at，
-        // 否则这批文档行会在之后每次 L2 运行中被反复重查。
-        const latestCursor = memRecords.reduce((latest, r) => (r.updatedAt > latest ? r.updatedAt : latest), "");
-        logger.debug?.(
-          `${TAG} [L2] Batch is all document-derived (${memRecords.length} record(s)), scene extraction skipped, cursor advanced to ${latestCursor}`,
-        );
-        return { latestCursor: latestCursor || undefined };
-      }
-
+      // fork 文档子系统（2026-08-18 再修订）：L2 场景块恢复消费文档派生原子
+      // （文档知识照常参与场景组织；仅 L3 触发计数仍排除文档派生，见 markL1ExtractionComplete）。
       logger.debug?.(
-        `${TAG} [L2] Incremental query returned ${memRecords.length} record(s), ${sceneRecords.length} scene-eligible (session=${sessionKey})`,
+        `${TAG} [L2] Incremental query returned ${memRecords.length} record(s) (session=${sessionKey})`,
       );
 
-      records = sceneRecords.map((r) => ({
+      records = memRecords.map((r) => ({
         content: r.content,
         created_at: r.createdAt,
         id: r.id,
@@ -959,7 +941,7 @@ export function createL2Runner(opts: {
     }
 
     if (processedTotal > 0) {
-      // 游标按全量批次（含被排除的文档行）推进，避免晚于会话行的文档行被反复重查。
+      // 游标按全量批次推进（memRecords 与 records 同源，无排除行）。
       const latestCursor = memRecords.reduce((latest, r) => (r.updatedAt > latest ? r.updatedAt : latest), "");
       logger.debug?.(`${TAG} [L2] Extraction complete: processed=${processedTotal}, latestCursor=${latestCursor}`);
       return { latestCursor: latestCursor || undefined };

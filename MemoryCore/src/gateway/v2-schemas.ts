@@ -177,6 +177,11 @@ export interface AtomicDetail extends GeneratedAtomicDetail {
   source_message_ids?: string[];
   /** 派生自的 L0 会话 id（文档记忆为 memdoc:<documentId>:v<n>）。 */
   session_id?: string;
+  /**
+   * 场景/分组名（fork：显式返回，与 background 同源同值）。
+   * 文档派生原子 = 文档标题；会话原子 = L1 提炼时的 scene_name。
+   */
+  scene_name?: string;
 }
 
 export interface AtomicQueryData {

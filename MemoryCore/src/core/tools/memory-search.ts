@@ -89,6 +89,10 @@ export async function executeMemorySearch(params: {
   limit: number;
   type?: string;
   scene?: string;
+  /** 时间范围下界（epoch ms，含）；按命中项 updated_at 过滤。 */
+  timeStartMs?: number;
+  /** 时间范围上界（epoch ms，含）；按命中项 updated_at 过滤。 */
+  timeEndMs?: number;
   filter?: IsolationFilter;
   vectorStore?: IMemoryStore;
   embeddingService?: EmbeddingService;
@@ -99,6 +103,8 @@ export async function executeMemorySearch(params: {
     limit,
     type: typeFilter,
     scene: sceneFilter,
+    timeStartMs,
+    timeEndMs,
     filter: isolationFilter,
     vectorStore,
     embeddingService,
@@ -297,6 +303,20 @@ export async function executeMemorySearch(params: {
       r.scene_name.toLowerCase().includes(normalizedScene),
     );
     logger?.debug?.(`${TAG} After scene filter "${sceneFilter}": ${results.length}/${preFilterCount}`);
+  }
+  if (timeStartMs !== undefined || timeEndMs !== undefined) {
+    // 时间范围过滤（fork：atomic/search time_start/time_end）。按 updated_at（ISO 8601，
+    // 字典序即时间序）判定；在 RRF 合并后、截断前应用。候选池仅 limit*3，窗口很窄时
+    // 可能取不满 limit——属可接受的近似（与 type/scene 次级过滤同语义）。
+    results = results.filter((r) => {
+      if (!r.updated_at) return false;
+      if (timeStartMs !== undefined && new Date(r.updated_at).getTime() < timeStartMs) return false;
+      if (timeEndMs !== undefined && new Date(r.updated_at).getTime() > timeEndMs) return false;
+      return true;
+    });
+    logger?.debug?.(
+      `${TAG} After time filter [${timeStartMs ?? "-∞"}, ${timeEndMs ?? "+∞"}]: ${results.length}/${preFilterCount}`,
+    );
   }
 
   // ── Trim to requested limit ──
