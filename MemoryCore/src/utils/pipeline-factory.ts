@@ -999,8 +999,10 @@ export function createL3Runner(opts: {
     const executionScopes = scopes.length > 0 ? scopes : [DEFAULT_PROFILE_SCOPE];
     let generatedAny = false;
     const l3PromptTargets = executionScopes.map((scope) => {
+      // DEFAULT_PROFILE_SCOPE("global") 等无 team/agent 结构的 scope 解析为 undefined，
+      // 走全缺省 prompt target，不能直接解引用（否则空库首跑 L3 必炸）。
       const isolation = parseProfileIsolationScope(scope);
-      return { teamId: isolation.teamId, agentId: isolation.agentId, layer: "l3" as const };
+      return { teamId: isolation?.teamId, agentId: isolation?.agentId, layer: "l3" as const };
     });
     const l3Prompts = await resolveMemoryPrompts(vectorStore, l3PromptTargets);
 
@@ -1045,8 +1047,9 @@ export function createL3Runner(opts: {
       }
 
       logger.info(`${TAG} [L3] Starting persona generation: ${reason} (scope=${scope})`);
-      // 反解 scope 拿回 teamId/userId/agentId/sessionId 给 langfuse trace 用
-      const scopeIsolation = parseProfileIsolationScope(scope);
+      // 反解 scope 拿回 teamId/userId/agentId/sessionId 给 langfuse trace 用；
+      // "global" 等无法解析的 scope 回退空 isolation（各字段可选，undefined 即全局态）。
+      const scopeIsolation = parseProfileIsolationScope(scope) ?? {};
       const l3StartMs = Date.now();
       const resolvedL3Prompt = l3Prompts.get(memoryPromptResolveKey({
         teamId: scopeIsolation.teamId,
