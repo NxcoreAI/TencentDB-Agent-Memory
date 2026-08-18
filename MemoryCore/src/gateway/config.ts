@@ -13,7 +13,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { getEnv } from "../utils/env.js";
 import { parseConfig as parseMemoryConfig } from "../config.js";
-import type { MemoryTdaiConfig } from "../config.js";
+import type { EmbeddingConfig, MemoryTdaiConfig } from "../config.js";
 import type { StandaloneLLMConfig } from "../adapters/standalone/llm-runner.js";
 
 // ============================
@@ -516,6 +516,74 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       captureTimeoutMs: num(topLevelEmbedding, "captureTimeoutMs") ?? memory.embedding.captureTimeoutMs,
       proxyUrl: str(topLevelEmbedding, "proxyUrl") ?? memory.embedding.proxyUrl,
     };
+  }
+
+  // ── Embedding env overrides (TDAI_EMBEDDING_*) ──
+  // 与 TDAI_LLM_* 相同的优先级：env > 顶层 yaml `embedding` > memory.embedding
+  // 解析默认值。宿主进程（如 EverRoom 桌面 supervisor）可以不落配置文件、
+  // 直接用环境变量下发 embedding 配置；存在任一 env 键即触发合并。
+  // 校验语义复刻 parseMemoryConfig 的 embedding 分支：远程 provider 缺必填
+  // 字段时禁用 embedding 并写 configError（不抛异常，服务继续运行）。
+  const parseEnvBool = (name: string): boolean | undefined => {
+    const raw = env(name);
+    if (raw === undefined) return undefined;
+    if (raw === "true" || raw === "1") return true;
+    if (raw === "false" || raw === "0") return false;
+    return undefined;
+  };
+  const embeddingEnvOverrides = {
+    provider: env("TDAI_EMBEDDING_PROVIDER"),
+    baseUrl: env("TDAI_EMBEDDING_BASE_URL"),
+    apiKey: env("TDAI_EMBEDDING_API_KEY"),
+    model: env("TDAI_EMBEDDING_MODEL"),
+    dimensions: envInt("TDAI_EMBEDDING_DIMENSIONS"),
+    sendDimensions: parseEnvBool("TDAI_EMBEDDING_SEND_DIMENSIONS"),
+    enabled: parseEnvBool("TDAI_EMBEDDING_ENABLED"),
+    conflictRecallTopK: envInt("TDAI_EMBEDDING_CONFLICT_RECALL_TOP_K"),
+    maxInputChars: envInt("TDAI_EMBEDDING_MAX_INPUT_CHARS"),
+    timeoutMs: envInt("TDAI_EMBEDDING_TIMEOUT_MS"),
+    recallTimeoutMs: envInt("TDAI_EMBEDDING_RECALL_TIMEOUT_MS"),
+    captureTimeoutMs: envInt("TDAI_EMBEDDING_CAPTURE_TIMEOUT_MS"),
+    proxyUrl: env("TDAI_EMBEDDING_PROXY_URL"),
+  };
+  const embeddingEnvSet = Object.values(embeddingEnvOverrides).some((value) => value !== undefined);
+  if (embeddingEnvSet) {
+    const defined = Object.fromEntries(
+      Object.entries(embeddingEnvOverrides).filter(([, value]) => value !== undefined),
+    ) as Partial<EmbeddingConfig>;
+    const merged: EmbeddingConfig = { ...memory.embedding, ...defined };
+
+    if (merged.provider === "none") {
+      merged.enabled = false;
+      merged.dimensions = 0;
+      merged.model = "";
+    } else if (merged.provider === "local") {
+      // 与 parser 一致：local 不对用户开放，视同禁用。
+      merged.enabled = false;
+      merged.provider = "none";
+      merged.configError =
+        "Local embedding provider is not available in user config. " +
+        "Please configure a remote embedding provider (e.g. openai, deepseek). Embedding has been disabled.";
+    } else {
+      const missingFields: string[] = [];
+      if (merged.provider === "qclaw" && !merged.proxyUrl) missingFields.push("proxyUrl");
+      if (!merged.apiKey) missingFields.push("apiKey");
+      if (!merged.baseUrl) missingFields.push("baseUrl");
+      if (!merged.model) missingFields.push("model");
+      if (!merged.dimensions || merged.dimensions <= 0) missingFields.push("dimensions");
+
+      if (missingFields.length > 0) {
+        merged.enabled = false;
+        merged.configError =
+          `Embedding provider '${String(merged.provider)}' requires ${merged.provider === "qclaw" ? "'proxyUrl', " : ""}'apiKey', 'baseUrl', 'model', and 'dimensions' to be set. ` +
+          `Missing: ${missingFields.join(", ")}. Embedding has been disabled.`;
+      } else if (defined.enabled === undefined) {
+        // env 下发了完整远程配置且未显式关闭 → 视为启用
+        // （无 yaml 时 parser 默认 enabled=false + provider=none，这里翻转）。
+        merged.enabled = true;
+      }
+    }
+    memory.embedding = merged;
   }
 
   // ── Skill module config ──
