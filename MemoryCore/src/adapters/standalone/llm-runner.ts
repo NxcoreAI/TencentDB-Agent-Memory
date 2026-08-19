@@ -339,33 +339,32 @@ export class StandaloneLLMRunner implements LLMRunner {
 
       let result = await generateText(requestArgs);
 
-      // ── 空正文防护（纯文本任务）──
-      // 思考型模型（GLM-5.x 等）偶发把全部 completion 耗在推理上
-      // （finish=length）或被安全策略过滤（finish=content_filter），
-      // content 为空。纯文本任务（L1 抽取/去重）的空正文永远不合法：
-      // 静默返回 "" 会让上游只剩 NO_JSON 警告，而 L1 游标照常推进，
-      // 该批消息被永久跳过。这里重试一次（length 时加倍 token 预算），
-      // 仍为空则抛错，让管线按任务失败处理（不推游标、退避重跑）。
-      // 工具任务（L2/L3 以 write 落文件、正文可为空）不做此检查。
+      // ── 空正文/截断防护（纯文本任务）──
+      // 思考型模型（GLM-5.x 等）推理 + 正文合计超 maxOutputTokens 时:
+      // 烧光是空 content,烧剩是半截 JSON。空正文会让上游只剩 NO_JSON 警告;
+      // 截断 JSON 经贪婪数组正则打捞后必然 PARSE_FAIL——两种情况 extracted=0
+      // 而 L1 游标照常推进,该批消息被永久跳过。这里对二者都重试一次
+      // (length 直接放大 4 倍预算,下限 8192、封顶 32768),重试仍不可用则
+      // 抛错,让管线按任务失败处理(不推游标、退避重跑)。
+      // 工具任务(L2/L3 以 write 落文件、正文可为空)不做此检查。
       let text = (result.text ?? "").trim();
-      if (!tools && text.length === 0) {
-        const firstFinish = result.finishReason ?? "unknown";
+      let finish = result.finishReason ?? "unknown";
+      if (!tools && (text.length === 0 || finish === "length")) {
+        const problem = text.length === 0 ? "empty output" : "length-truncated output";
+        const retryMaxTokens = Math.min(Math.max(maxTokens * 4, 8_192), 32_768);
         this.logger?.warn?.(
-          `${TAG} empty output on pure-text task (taskId=${params.taskId}, ` +
-          `finishReason=${firstFinish}, maxTokens=${maxTokens}, ` +
-          `usage=${JSON.stringify(result.usage ?? null)}) — retrying once`,
+          `${TAG} ${problem} on pure-text task (taskId=${params.taskId}, ` +
+          `finishReason=${finish}, maxTokens=${maxTokens}, outputChars=${text.length}, ` +
+          `usage=${JSON.stringify(result.usage ?? null)}) — retrying with maxTokens=${retryMaxTokens}`,
         );
-        const retryMaxTokens = firstFinish === "length"
-          ? Math.min(maxTokens * 2, 32_768)
-          : maxTokens;
         result = await generateText({ ...requestArgs, maxOutputTokens: retryMaxTokens });
         text = (result.text ?? "").trim();
-        if (text.length === 0) {
-          const retryFinish = result.finishReason ?? "unknown";
+        finish = result.finishReason ?? "unknown";
+        if (text.length === 0 || finish === "length") {
           throw new Error(
-            `LLM returned empty content twice on pure-text task ` +
-            `(taskId=${params.taskId}, model=${this.model}, ` +
-            `finishReason=${firstFinish}→${retryFinish}, maxTokens=${retryMaxTokens}, ` +
+            `LLM ${text.length === 0 ? "returned empty content" : "output still length-truncated"} after retry ` +
+            `on pure-text task (taskId=${params.taskId}, model=${this.model}, ` +
+            `finishReason=${finish}, maxTokens=${retryMaxTokens}, outputChars=${text.length}, ` +
             `promptChars=${params.prompt.length})`,
           );
         }
